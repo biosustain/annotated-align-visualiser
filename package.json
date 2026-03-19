@@ -1,0 +1,19 @@
+{
+  "name": "annotated-align-visualiser",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "DNA sequence alignment visualizer",
+  "author": "biosustain",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+  "@teselagen/bio-parsers": "^0.4.36"
+  },
+  "devDependencies": {
+    "vite": "^6.4.1"
+  }
+}

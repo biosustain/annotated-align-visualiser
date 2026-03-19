@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Annotated Alignment Visualiser</title>
+  </head>
+  <body>
+    <div id="app" class="container">
+      <header>
+        <h1>Annotated Alignment Visualiser</h1>
+        <p class="subtitle">DNA Sequence Trace Visualization</p>
+      </header>
+
+      <main>
+        <section class="controls">
+          <label for="file-input" class="btn btn-primary"
+            >Upload JSON File</label
+          >
+          <input
+            id="file-input"
+            type="file"
+            accept=".json"
+            style="display: none"
+          />
+          <label for="annotation-input" class="btn btn-primary"
+            >Upload Annotations</label
+          >
+          <input
+            id="annotation-input"
+            type="file"
+            accept=".gb,.gbk,.gtf,.gff,.gff3,.fasta,.fa,.fna"
+            style="display: none"
+          />
+          <button id="load-example-button" class="btn btn-secondary">
+            Load Example
+          </button>
+        </section>
+
+        <section class="plot-container">
+          <div id="plot" style="width: 100%; height: 600px"></div>
+        </section>
+
+        <section id="annotation-container" class="annotation-container hidden">
+          <div id="annotation-header" class="annotation-header">
+            <h3 id="annotation-title">Annotations</h3>
+            <span id="annotation-toggle" class="toggle-icon">▼</span>
+          </div>
+          <div id="annotation-json" class="annotation-json">
+            <p id="annotation-file-name" class="file-name"></p>
+            <pre id="annotation-json-content"></pre>
+          </div>
+        </section>
+
+        <footer class="info">
+          <p id="current-info" class="hidden"></p>
+          <p id="placeholder-info" class="placeholder">
+            Load example data or upload a JSON file to begin
+          </p>
+        </footer>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
