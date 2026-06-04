@@ -1,5 +1,5 @@
 import './main.css'
-import { renderAlignment } from './renderer'
+import { renderAlignment, translateAnnotationRangeToMainAxis, translateMainAxisRangeToAnnotation } from './renderer'
 import { parseAnnotationFile, formatJsonForDisplay } from './parsers'
 import "https://cdn.plot.ly/plotly-3.4.0.min.js"
 
@@ -62,7 +62,7 @@ const syncAuxYAxisVisibility = () => {
         const visible = figure.data.some(trace => trace?.yaxis === `y${axisSuffix}` && isTraceVisible(trace))
         const currentlyVisible = figure?.layout?.[`yaxis${axisSuffix}`]?.visible !== false
         if (visible !== currentlyVisible) {
-            toSync[`yaxis${axisSuffix}.visible`] = visible
+            toSync[`yaxis${axisSuffix}.visible`] = false //visible
         }
     }
 
@@ -94,19 +94,19 @@ const buildTickSets = data => {
     }
 }
 
-const getRangeFromRelayout = relayoutData => {
-    if (Array.isArray(relayoutData?.['xaxis.range'])) {
-        return relayoutData['xaxis.range']
+const getRangeFromRelayout = (axis, relayoutData) => {
+    if (Array.isArray(relayoutData?.[`${axis}.range`])) {
+        return relayoutData[`${axis}.range`]
     }
 
-    const rangeStart = Number(relayoutData?.['xaxis.range[0]'])
-    const rangeEnd = Number(relayoutData?.['xaxis.range[1]'])
+    const rangeStart = Number(relayoutData?.[`${axis}.range[0]`])
+    const rangeEnd = Number(relayoutData?.[`${axis}.range[1]`])
     if (Number.isFinite(rangeStart) && Number.isFinite(rangeEnd)) {
         return [rangeStart, rangeEnd]
     }
 
-    if (relayoutData?.['xaxis.autorange']) {
-        const axisRange = figure?._fullLayout?.xaxis?.range
+    if (relayoutData?.[`${axis}.autorange`]) {
+        const axisRange = figure?._fullLayout?.[axis]?.range
         if (Array.isArray(axisRange) && axisRange.length === 2) {
             return axisRange
         }
@@ -205,13 +205,33 @@ const attachFigureInteractions = () => {
         })
     })
 
+    let disableNextAxisSync = false
     figure.on('plotly_relayout', eventData => {
-        const xRange = getRangeFromRelayout(eventData)
-        if (!xRange) {
-            return
+        const xRange = getRangeFromRelayout('xaxis', eventData)
+        if (xRange) {
+            applyTickDensityForRange(xRange)
+            if (disableNextAxisSync) {
+                disableNextAxisSync = false
+                return
+            }
+            disableNextAxisSync = true
+            // Scale annotation x-axis to match the new x-axis range
+            return plotly.relayout(figure, {
+                'xaxis3.range': translateMainAxisRangeToAnnotation(state.currentData, xRange)
+            })
         }
-
-        applyTickDensityForRange(xRange)
+        const x3Range = getRangeFromRelayout('xaxis3', eventData)
+        if (x3Range) {
+            if (disableNextAxisSync) {
+                disableNextAxisSync = false
+                return
+            }
+            disableNextAxisSync = true
+            // Scale x-axis to fit the annotation x-axis range
+            return plotly.relayout(figure, {
+                'xaxis.range': translateAnnotationRangeToMainAxis(state.currentData, x3Range)
+            })
+        }
     })
 
     figure.on('plotly_restyle', () => {

@@ -19,7 +19,7 @@ const buildAnnotationFigureData = annotationData => {
         const barTrace = annotationsToBarTrace(annotations)
         traces.push({
             ...barTrace,
-            xaxis: 'x2', // Use a separate x-axis to not show up in range slider
+            xaxis: 'x3',
             yaxis: `y${yaxisIdx}`,
             name: annotationType,
         })
@@ -53,6 +53,33 @@ const buildAxisDomains = annotationAxisCount => {
     })
 
     return { mainPlotDomain, annotationDomains }
+}
+
+
+export const translateMainAxisRangeToAnnotation = (data, [start, end]) => {
+    const { refpos, gappedTrace: { basecallPos } } = data
+    let annotationStart = 0;
+    const traceLength = basecallPos.length
+    while(annotationStart <= traceLength && basecallPos[annotationStart] < start) {
+        annotationStart++
+    }
+    let annotationEnd = annotationStart
+    while(annotationEnd <= traceLength && basecallPos[annotationEnd] < end) {
+        annotationEnd++
+    }
+    return [
+        annotationStart + refpos,
+        annotationEnd + refpos
+    ]
+}
+
+export const translateAnnotationRangeToMainAxis = (data, [start, end]) => {
+    const { refpos, gappedTrace: { basecallPos } } = data
+    const traceLength = basecallPos.length
+    return [
+        basecallPos[Math.min(start - refpos, traceLength - 1)],
+        basecallPos[Math.min(end - refpos, traceLength - 1)]
+    ]
 }
 
 export const renderAlignment = (figure, raw_data, Plotly, annotationData = null) => {
@@ -210,6 +237,10 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             matches: 'x',
             overlaying: 'x',
         },
+        xaxis3: {
+            visible: false,
+            range: translateMainAxisRangeToAnnotation(raw_data, ref_pos_range),
+        },
         shapes: [
             {
                 type: 'line',
@@ -253,7 +284,7 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         grid: {
             rows: 5,
             columns: 1,
-            subplots: [['x2y5'], ['xy']]
+            subplots: [['x3y5'], ['xy']],
         }
     };
 
