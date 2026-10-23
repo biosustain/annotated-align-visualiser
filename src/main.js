@@ -7,8 +7,11 @@ import {
     REFERENCE_ROW_START_LABEL_INDEX,
     REFERENCE_ROW_END_LABEL_INDEX,
     ARROW_SHAPE_NAME,
+    ANNOTATION_LABEL_NAME,
     arrowHeadsNeedRedraw,
     buildAnnotationArrowPaths,
+    buildAnnotationLabels,
+    annotationsInAlignedRegion,
     translateAnnotationRangeToMainAxis,
     translateMainAxisRangeToAnnotation
 } from './renderer'
@@ -34,6 +37,9 @@ const state = {
     // The example's annotations describe the example reference only, so they
     // are dropped when a trace of another reference is uploaded.
     annotationsFromExample: false,
+    // The annotations drawn on the tracks: those in the aligned region of the
+    // current trace.
+    trackAnnotations: null,
     showAnnotationJson: true,
     tickSets: null,
     activeTickDensity: 'all',
@@ -215,25 +221,33 @@ const updateReferenceRowLabels = xRange => {
     setReferenceRowLabel(REFERENCE_ROW_END_LABEL_INDEX, `${end}`)
 }
 
+const annotationBasesPerPixel = annotationRange => {
+    const plotWidthPx = figure._fullLayout?.xaxis3?._length
+    if (!plotWidthPx) {
+        return null
+    }
+
+    const annotationSpan = Math.abs(annotationRange[1] - annotationRange[0])
+    return annotationSpan / plotWidthPx
+}
+
 // Arrow heads keep a fixed pixel size, so their paths are rebuilt for the new
 // annotation range once the zoom has changed enough to matter. Folded into the
 // axis-sync relayout that runs anyway, which is why the new zoom level is
 // recorded here.
 const arrowShapeUpdates = annotationRange => {
-    const plotWidthPx = figure._fullLayout?.xaxis3?._length
-    if (!plotWidthPx) {
+    const basesPerPixel = annotationBasesPerPixel(annotationRange)
+    if (basesPerPixel === null) {
         return {}
     }
 
-    const annotationSpan = Math.abs(annotationRange[1] - annotationRange[0])
-    const basesPerPixel = annotationSpan / plotWidthPx
     if (!arrowHeadsNeedRedraw(state.arrowBasesPerPixel, basesPerPixel)) {
         return {}
     }
     state.arrowBasesPerPixel = basesPerPixel
 
     const arrowPaths = buildAnnotationArrowPaths(
-        state.annotationData?.parsedSequence, basesPerPixel)
+        state.trackAnnotations, basesPerPixel)
     const arrowShapeIndexes = figure.layout.shapes.flatMap((shape, index) =>
         shape.name === ARROW_SHAPE_NAME ? [index] : [])
 
@@ -241,27 +255,86 @@ const arrowShapeUpdates = annotationRange => {
         [`shapes[${shapeIndex}].path`, arrowPaths[arrowIndex]]))
 }
 
-// Arrows are layout shapes, which the legend does not control. Each annotation
-// type has its own y-axis, so an arrow follows the legend entry that shares it.
+// Arrows and labels are layout shapes and annotations, which the legend does
+// not control. Each annotation type has its own y-axis, so they follow the
+// legend entry that shares it.
+const hiddenAnnotationAxes = () => new Set(figure.data
+    .filter(trace => trace.xaxis === 'x3' && !isTraceVisible(trace))
+    .map(trace => trace.yaxis))
+
+// Position and text of every label for the annotation range, keyed
+// by the label's index among the layout annotations.
+const annotationLabelUpdates = annotationRange => {
+    const basesPerPixel = annotationBasesPerPixel(annotationRange)
+    if (basesPerPixel === null) {
+        return []
+    }
+
+    const labels = buildAnnotationLabels(
+        state.trackAnnotations, annotationRange, basesPerPixel)
+    const hiddenAxes = hiddenAnnotationAxes()
+    const labelAnnotationIndexes = figure.layout.annotations.flatMap(
+        (annotation, index) => annotation.name === ANNOTATION_LABEL_NAME ? [index] : [])
+
+    // A label is hidden by emptying its text; see buildAnnotationLabel.
+    return labelAnnotationIndexes.map((annotationIndex, labelIndex) => {
+        const label = labels[labelIndex]
+        const yref = figure.layout.annotations[annotationIndex].yref
+        return {
+            annotationIndex,
+            update: {
+                x: label.x,
+                text: hiddenAxes.has(yref) ? '' : label.text
+            }
+        }
+    })
+}
+
+// Labels move with every pan, to stay on the part of each feature in view.
+// Sending them as relayout updates makes Plotly replot the whole figure, so
+// they are written into both layouts instead, just before a relayout that
+// redraws the annotations anyway: an axis-range relayout draws them from
+// _fullLayout, a full redraw rebuilds that from layout.
+const writeAnnotationLabels = annotationRange => {
+    for (const { annotationIndex, update } of annotationLabelUpdates(annotationRange)) {
+        Object.assign(figure.layout.annotations[annotationIndex], update)
+        Object.assign(figure._fullLayout.annotations[annotationIndex], update)
+    }
+}
+
+// The same labels as relayout updates, for the rare changes that replot the
+// figure anyway.
+const annotationLabelRelayoutUpdates = annotationRange => {
+    const updates = {}
+    for (const { annotationIndex, update } of annotationLabelUpdates(annotationRange)) {
+        for (const [key, value] of Object.entries(update)) {
+            updates[`annotations[${annotationIndex}].${key}`] = value
+        }
+    }
+    return updates
+}
+
 const syncArrowVisibility = () => {
     const shapes = figure.layout?.shapes ?? []
-    const hiddenAnnotationAxes = new Set(figure.data
-        .filter(trace => trace.xaxis === 'x3' && !isTraceVisible(trace))
-        .map(trace => trace.yaxis))
+    const hiddenAxes = hiddenAnnotationAxes()
 
     const updates = {}
     shapes.forEach((shape, index) => {
         if (shape.name !== ARROW_SHAPE_NAME) {
             return
         }
-        const shouldBeVisible = !hiddenAnnotationAxes.has(shape.yref)
+        const shouldBeVisible = !hiddenAxes.has(shape.yref)
         if ((shape.visible !== false) !== shouldBeVisible) {
             updates[`shapes[${index}].visible`] = shouldBeVisible
         }
     })
 
     if (Object.keys(updates).length > 0) {
-        plotly.relayout(figure, updates)
+        const annotationRange = figure._fullLayout.xaxis3.range
+        plotly.relayout(figure, {
+            ...updates,
+            ...annotationLabelRelayoutUpdates(annotationRange)
+        })
     }
 }
 
@@ -273,12 +346,14 @@ const refreshForPlotWidth = () => {
     applyTickDensityForRange(xRange)
     updateReferenceRowLabels(xRange)
 
+    // Labels are re-fitted to the new width on every resize; a resize is rare
+    // enough that the redraw this takes does not matter.
     const annotationRange = figure._fullLayout?.xaxis3?.range
     if (hasAnnotationAxis() && annotationRange) {
-        const updates = arrowShapeUpdates(annotationRange)
-        if (Object.keys(updates).length > 0) {
-            return plotly.relayout(figure, updates)
-        }
+        return plotly.relayout(figure, {
+            ...arrowShapeUpdates(annotationRange),
+            ...annotationLabelRelayoutUpdates(annotationRange)
+        })
     }
 }
 
@@ -415,6 +490,7 @@ const attachFigureInteractions = () => {
             // Scale annotation x-axis to match the new x-axis range
             const annotationRange =
                 translateMainAxisRangeToAnnotation(state.currentData, xRange)
+            writeAnnotationLabels(annotationRange)
             return plotly.relayout(figure, {
                 'xaxis3.range': annotationRange,
                 ...arrowShapeUpdates(annotationRange)
@@ -480,7 +556,9 @@ const renderData = (data) => {
     state.activeTickDensity = 'all'
     // The new figure's arrows are drawn with an estimated plot width.
     state.arrowBasesPerPixel = null
-    renderAlignment(figure, data, plotly, state.annotationData?.parsedSequence)
+    state.trackAnnotations = annotationsInAlignedRegion(
+        state.annotationData?.parsedSequence, data)
+    renderAlignment(figure, data, plotly, state.trackAnnotations)
     attachFigureInteractions()
     syncAuxYAxisVisibility()
     updateCurrentInfo()
