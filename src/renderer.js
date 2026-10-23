@@ -333,7 +333,11 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         type: 'scatter',
         xaxis: 'x2',
         yaxis: 'y3',
-        marker: { size: 16, opacity: 0 },
+        // Any maxdisplayed makes Plotly draw only the markers in view, and
+        // one per basecall never thins those out. Restyling every marker on
+        // each pan was the largest part of the pan cost. Hover still finds
+        // every basecall in view, since drawn markers keep their hover size.
+        marker: { size: 16, opacity: 0, maxdisplayed: basecallPos.length },
         hovertemplate: 'Basecall %{text}<br>' +
             'Basecall index %{customdata[1]}<br>' +
             'Reference sequence position %{customdata[0]}<br>' +
