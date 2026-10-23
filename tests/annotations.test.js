@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { makeAnnotationEndsExclusive } from '../src/parsers.js'
 import {
+    arrowHeadsNeedRedraw,
     buildBasecallRefPositions,
     translateAnnotationRangeToMainAxis,
     translateMainAxisRangeToAnnotation
@@ -85,5 +86,51 @@ describe('axis translation', () => {
 
         // Then it lands on the x of those bases, where they are drawn
         assert.deepEqual(range, [8, 19])
+    })
+})
+
+describe('arrowHeadsNeedRedraw', () => {
+    it('redraws arrow heads not yet drawn at a measured plot width', () => {
+        // Given arrows drawn with the estimated plot width
+        const drawnBasesPerPixel = null
+
+        // When the first measured zoom level arrives
+        const needsRedraw = arrowHeadsNeedRedraw(drawnBasesPerPixel, 40 / 1000)
+
+        // Then the arrow heads are redrawn
+        assert.equal(needsRedraw, true)
+    })
+
+    it('redraws arrow heads last drawn at an unmeasurable zoom', () => {
+        // Given arrows drawn while the reference span could not be measured
+        const drawnBasesPerPixel = NaN
+
+        // When a measured zoom level arrives
+        const needsRedraw = arrowHeadsNeedRedraw(drawnBasesPerPixel, 40 / 1000)
+
+        // Then the arrow heads are redrawn
+        assert.equal(needsRedraw, true)
+    })
+
+    it('keeps arrow heads when a pan shifts the view by one base', () => {
+        // Given arrows drawn with 40 bases across 1000 pixels
+        const drawnBasesPerPixel = 40 / 1000
+
+        // When a pan brings 41 bases into view
+        const needsRedraw = arrowHeadsNeedRedraw(drawnBasesPerPixel, 41 / 1000)
+
+        // Then the arrow heads are left as they are
+        assert.equal(needsRedraw, false)
+    })
+
+    it('redraws arrow heads when the zoom changes', () => {
+        // Given arrows drawn with 40 bases across 1000 pixels
+        const drawnBasesPerPixel = 40 / 1000
+
+        // When a zoom out brings 80 bases into view
+        const needsRedraw = arrowHeadsNeedRedraw(drawnBasesPerPixel, 80 / 1000)
+
+        // Then the arrow heads are redrawn
+        assert.equal(needsRedraw, true)
     })
 })
