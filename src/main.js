@@ -21,19 +21,19 @@ if (!plotly) {
     throw new Error('Plotly is not loaded. Ensure https://cdn.plot.ly/plotly-3.4.0.min.js is available.')
 }
 
-const EXAMPLE_REQUEST = {
-    method: 'POST',
-    headers: {
-        accept: 'application/json, text/plain, */*',
-        'content-type': 'multipart/form-data; boundary=----WebKitFormBoundarytPLXWYbDjgWq3smR'
-    },
-    body: '------WebKitFormBoundarytPLXWYbDjgWq3smR\r\nContent-Disposition: form-data; name="leftTrim"\r\n\r\n50\r\n------WebKitFormBoundarytPLXWYbDjgWq3smR\r\nContent-Disposition: form-data; name="rightTrim"\r\n\r\n50\r\n------WebKitFormBoundarytPLXWYbDjgWq3smR\r\nContent-Disposition: form-data; name="showExample"\r\n\r\nshowExample\r\n------WebKitFormBoundarytPLXWYbDjgWq3smR--\r\n'
-}
+// A trace and the annotated reference it was aligned to, served from
+// public/examples/. See the README there for where they come from.
+const EXAMPLE_BASE_URL = `${import.meta.env.BASE_URL}examples/`
+const EXAMPLE_TRACE_FILE_NAME = 'Spec-2xU6gRNA-1.json'
+const EXAMPLE_ANNOTATION_FILE_NAME = 'puc19_spec_2xu6grna.gb'
 
 const state = {
     loading: false,
     currentData: null,
     annotationData: null,
+    // The example's annotations describe the example reference only, so they
+    // are dropped when a trace of another reference is uploaded.
+    annotationsFromExample: false,
     showAnnotationJson: true,
     tickSets: null,
     activeTickDensity: 'all',
@@ -486,14 +486,33 @@ const renderData = (data) => {
     updateCurrentInfo()
 }
 
+const fetchExampleFile = async (fileName) => {
+    const response = await fetch(`${EXAMPLE_BASE_URL}${fileName}`)
+    if (!response.ok) {
+        throw new Error(`${fileName}: ${response.status} ${response.statusText}`)
+    }
+    return response
+}
+
 const loadExample = async () => {
     state.loading = true
     updateLoadingState()
 
     try {
-        const response = await fetch('https://gear-genomics.embl.de/sage/api/v1/upload', EXAMPLE_REQUEST)
-        const json = await response.json()
-        renderData(json.data)
+        const traceResponse = await fetchExampleFile(EXAMPLE_TRACE_FILE_NAME)
+        const traceData = await traceResponse.json()
+
+        // The annotation parser reads File objects, as from the upload input.
+        const annotationResponse = await fetchExampleFile(EXAMPLE_ANNOTATION_FILE_NAME)
+        const annotationText = await annotationResponse.text()
+        const annotationFile = new File([annotationText], EXAMPLE_ANNOTATION_FILE_NAME)
+
+        // Without its annotations the example trace is still worth showing,
+        // but not with annotations left over from another reference.
+        clearAnnotations()
+        const annotationsApplied = await applyAnnotationFile(annotationFile)
+        state.annotationsFromExample = annotationsApplied
+        renderData(traceData)
     } catch (error) {
         console.error('Failed to load example:', error)
         alert('Failed to load example data')
@@ -513,6 +532,9 @@ const handleTraceUpload = (event) => {
     reader.addEventListener('load', () => {
         try {
             const data = JSON.parse(reader.result)
+            if (state.annotationsFromExample) {
+                clearAnnotations()
+            }
             renderData(data)
         } catch (error) {
             console.error('Failed to parse JSON:', error)
@@ -522,6 +544,34 @@ const handleTraceUpload = (event) => {
     reader.readAsText(file)
 }
 
+// Returns whether the annotations were applied; parse problems are alerted.
+const applyAnnotationFile = async (file) => {
+    const results = await parseAnnotationFile(file)
+    if (results.length !== 1) {
+        console.error('Expected exactly one annotation entry, got:', results)
+        alert('Failed to parse annotation file: expected exactly one annotation entry')
+        return false
+    }
+    const result = results[0]
+    if (!result.success) {
+        console.error('Parse error:', result.error)
+        alert(`Failed to parse annotation file: ${result.error}`)
+        return false
+    }
+
+    state.annotationData = result
+    state.annotationsFromExample = false
+    state.showAnnotationJson = true
+    updateAnnotationView()
+    return true
+}
+
+const clearAnnotations = () => {
+    state.annotationData = null
+    state.annotationsFromExample = false
+    updateAnnotationView()
+}
+
 const handleAnnotationUpload = async (event) => {
     const [file] = event.target.files
     if (!file) {
@@ -529,22 +579,10 @@ const handleAnnotationUpload = async (event) => {
     }
 
     try {
-        const results = await parseAnnotationFile(file)
-        if (results.length !== 1) {
-            console.error('Expected exactly one annotation entry, got:', results)
-            alert('Failed to parse annotation file: expected exactly one annotation entry')
+        const annotationsApplied = await applyAnnotationFile(file)
+        if (!annotationsApplied) {
             return
         }
-        const result = results[0]
-        if (!result.success) {
-            console.error('Parse error:', result.error)
-            alert(`Failed to parse annotation file: ${result.error}`)
-            return
-        }
-
-        state.annotationData = result
-        state.showAnnotationJson = true
-        updateAnnotationView()
 
         // renderData also resets the tick density the new figure starts with.
         if (state.currentData) {
