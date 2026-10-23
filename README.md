@@ -6,7 +6,7 @@ A Vue 3 + Vite web application for visualizing DNA sequence alignment traces. Re
 
 - 📊 Interactive Plotly.js visualization
 - 📁 Upload JSON alignment files
-- 📥 Load example data from GEAR genomics API
+- 📥 Load a bundled example trace with its GenBank annotations
 - 🔍 Zoom and pan with rangeslider
 - 🎨 Color-coded nucleotide peaks (A/C/G/T)
 - ❌ Highlight alignment mismatches
