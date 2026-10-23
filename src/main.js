@@ -372,9 +372,12 @@ const attachFigureInteractions = () => {
             return
         }
 
-        const [start, end] = annotationRange
+        // The feature is in reference positions; the main x-axis is in trace
+        // samples.
+        const mainAxisRange =
+            translateAnnotationRangeToMainAxis(state.currentData, annotationRange)
         plotly.relayout(figure, {
-            'xaxis.range': [start, end]
+            'xaxis.range': mainAxisRange
         })
     })
 
