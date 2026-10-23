@@ -4,9 +4,10 @@ import { annotationTypes } from "@teselagen/sequence-utils";
 const buildAnnotationFigureData = annotationData => {
     const yaxes = []
     const traces = []
+    const shapes = []
 
     if (!annotationData) {
-        return { traces, yaxes }
+        return { traces, yaxes, shapes }
     }
 
     let yaxisIdx = 3
@@ -23,6 +24,8 @@ const buildAnnotationFigureData = annotationData => {
             yaxis: `y${yaxisIdx}`,
             name: annotationType,
         })
+        shapes.push(...annotations.map(annotation =>
+            annotationToArrowShape(annotation, `y${yaxisIdx}`)))
         yaxes.push({
             title: {
                 text: annotationType
@@ -35,7 +38,7 @@ const buildAnnotationFigureData = annotationData => {
         })
     }
 
-    return { traces, yaxes }
+    return { traces, yaxes, shapes }
 }
 
 const buildAxisDomains = annotationAxisCount => {
@@ -56,29 +59,60 @@ const buildAxisDomains = annotationAxisCount => {
 }
 
 
-export const translateMainAxisRangeToAnnotation = (data, [start, end]) => {
-    const { refpos, gappedTrace: { basecallPos } } = data
-    let annotationStart = 0;
-    const traceLength = basecallPos.length
-    while(annotationStart <= traceLength && basecallPos[annotationStart] < start) {
-        annotationStart++
+// Reference position (0-based) of every basecall. Each alignment column maps
+// to refpos plus the number of reference bases before it, so `-` gaps in the
+// reference row do not advance the index.
+export const buildBasecallRefPositions = ({ refpos, refalign, gappedTrace }) => {
+    const refPositionByColumn = []
+    let nextRefPosition = refpos
+    for (const base of refalign) {
+        refPositionByColumn.push(nextRefPosition)
+        if (base !== '-') {
+            nextRefPosition++
+        }
     }
-    let annotationEnd = annotationStart
-    while(annotationEnd <= traceLength && basecallPos[annotationEnd] < end) {
-        annotationEnd++
+
+    return gappedTrace.basecallPos.map((_, basecallIndex) =>
+        refPositionByColumn[basecallIndex + gappedTrace.leadingGaps])
+}
+
+const refPositionAtBasecallIndex = (refPositions, basecallIndex) => {
+    const lastIndex = refPositions.length - 1
+    if (basecallIndex > lastIndex) {
+        return refPositions[lastIndex] + (basecallIndex - lastIndex)
+    }
+    return refPositions[basecallIndex]
+}
+
+export const translateMainAxisRangeToAnnotation = (data, [start, end]) => {
+    const { gappedTrace: { basecallPos } } = data
+    const refPositions = buildBasecallRefPositions(data)
+    const traceLength = basecallPos.length
+    let startIndex = 0
+    while (startIndex < traceLength && basecallPos[startIndex] < start) {
+        startIndex++
+    }
+    let endIndex = startIndex
+    while (endIndex < traceLength && basecallPos[endIndex] < end) {
+        endIndex++
     }
     return [
-        annotationStart + refpos,
-        annotationEnd + refpos
+        refPositionAtBasecallIndex(refPositions, startIndex),
+        refPositionAtBasecallIndex(refPositions, endIndex)
     ]
 }
 
 export const translateAnnotationRangeToMainAxis = (data, [start, end]) => {
-    const { refpos, gappedTrace: { basecallPos } } = data
-    const traceLength = basecallPos.length
+    const { gappedTrace: { basecallPos } } = data
+    const refPositions = buildBasecallRefPositions(data)
+    const lastIndex = basecallPos.length - 1
+    const indexOfRefPosition = refPosition => {
+        const index = refPositions.findIndex(position => position >= refPosition)
+        return index === -1 ? lastIndex : index
+    }
     return [
-        basecallPos[Math.min(start - refpos, traceLength - 1)],
-        basecallPos[Math.min(end - refpos, traceLength - 1)]
+        basecallPos[indexOfRefPosition(start)],
+        basecallPos[indexOfRefPosition(end)]
     ]
 }
 
@@ -163,14 +197,34 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         visible: 'legendonly'
     });
 
-    const window_size = 20;
-    const ref_pos_range = [
-        Math.max(0, (raw_data.refpos - window_size) ?? 0),
-        Math.max(0, (raw_data.refpos + window_size) ?? -1)
-    ].map(pos => raw_data.gappedTrace.basecallPos.at(pos) - 1);
-    const ref_pos = raw_data.gappedTrace.basecallPos.at(raw_data.refpos) - 1;
+    const refPositions = buildBasecallRefPositions(raw_data)
+    const basecallPos = raw_data.gappedTrace.basecallPos
 
-    const { traces: annotationTraces, yaxes: annotationYAxes } = buildAnnotationFigureData(annotationData)
+    data.push({
+        name: 'Reference',
+        x: basecallPos.map(pos => pos - 1),
+        y: basecallPos.map(() => 0.03),
+        text: basecallPos.map((_, index) => raw_data.refalign[index + raw_data.gappedTrace.leadingGaps]),
+        customdata: refPositions.map(position => position + 1),
+        mode: 'text',
+        type: 'scatter',
+        xaxis: 'x2',
+        yaxis: 'y3',
+        textfont: { family: 'monospace', size: 12 },
+        hovertemplate: 'ref position %{customdata}<extra></extra>',
+        showlegend: false
+    })
+
+    // The marker sits on the first aligned base; the view opens around it.
+    const window_size = 20
+    const lastBasecallIndex = basecallPos.length - 1
+    const ref_pos_range = [
+        basecallPos[0],
+        basecallPos[Math.min(2 * window_size, lastBasecallIndex)]
+    ].map(pos => pos - 1)
+    const ref_pos = basecallPos[0] - 1
+
+    const { traces: annotationTraces, yaxes: annotationYAxes, shapes: annotationShapes } = buildAnnotationFigureData(annotationData)
     data.push(...annotationTraces)
 
     const { mainPlotDomain, annotationDomains } = buildAxisDomains(annotationYAxes.length)
@@ -213,6 +267,7 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             zeroline: false,
             visible: false,
             fixedrange: true,
+            range: [0, 1.05],
             anchor: 'y'
         },
         legend: {
@@ -240,6 +295,9 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         xaxis3: {
             visible: false,
             range: translateMainAxisRangeToAnnotation(raw_data, ref_pos_range),
+            // Its drag strip would otherwise overlap the subplot below and
+            // swallow that subplot's hover events.
+            fixedrange: true,
         },
         shapes: [
             {
@@ -254,14 +312,15 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
                     width: 1.5,
                     dash: 'dot'
                 }
-            }
+            },
+            ...annotationShapes
         ],
         annotations: [{
             x: ref_pos,
             y: 1,
             xref: 'x',
             yref: 'paper',
-            text: 'ref position',
+            text: `ref position ${refPositions[0] + 1}`,
             showarrow: false,
             xanchor: 'center',
             yanchor: 'bottom',
@@ -281,10 +340,17 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             }
         ])),
         updatemenus,
+        // The default 'x' mode matches on x only, so annotations stacked in
+        // other rows at the same x never get a tooltip.
+        hovermode: 'closest',
         grid: {
-            rows: 5,
+            rows: annotationYAxes.length + 1,
             columns: 1,
-            subplots: [['x3y5'], ['xy']],
+            // Every annotation subplot must be declared or it gets no hover.
+            subplots: [
+                ...annotationYAxes.map(axis => [`x3y${axis._index}`]),
+                ['xy']
+            ],
         }
     };
 
@@ -293,32 +359,66 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
     Plotly.react(figure, data, layout, config);
 }
 
+const DEFAULT_ANNOTATION_COLOR = 'rgba(0,0,255,0.5)'
+const ARROW_HEAD_LENGTH = 10
+const ARROW_HALF_HEIGHT = 0.4
+
+const annotationColor = annotation => {
+    const colors = annotation.notes?.[annotation.forward ? 'ApEinfo_fwdcolor' : 'ApEinfo_revcolor']
+    return colors?.[0] ?? DEFAULT_ANNOTATION_COLOR
+}
+
+// A box whose tip points right on the plus strand and left on the minus strand.
+const annotationToArrowShape = (annotation, yref) => {
+    const { start, end } = annotation
+    const centerY = -annotation.yOffset
+    const top = centerY + ARROW_HALF_HEIGHT
+    const bottom = centerY - ARROW_HALF_HEIGHT
+    const headLength = Math.min(ARROW_HEAD_LENGTH, (end - start) / 2)
+
+    const path = annotation.forward
+        ? `M ${start},${bottom} L ${end - headLength},${bottom} L ${end},${centerY} L ${end - headLength},${top} L ${start},${top} Z`
+        : `M ${end},${bottom} L ${start + headLength},${bottom} L ${start},${centerY} L ${start + headLength},${top} L ${end},${top} Z`
+
+    return {
+        type: 'path',
+        path,
+        xref: 'x3',
+        yref,
+        fillcolor: annotationColor(annotation),
+        line: { width: 0 },
+        layer: 'above'
+    }
+}
+
 const annotationsToBarTrace = (annotations) => {
-    const x = [];
-    const y = [];
-    const base = [];
-    const color = [];
-    const text = [];
+    const x = []
+    const y = []
+    const base = []
+    const color = []
+    const customdata = []
 
     for (const annotation of annotations) {
-        x.push(annotation.end - annotation.start);
-        y.push(-annotation.yOffset);
-        base.push(annotation.start);
-        if (annotation.notes) {
-            if (annotation.forward && annotation.notes.ApEinfo_fwdcolor) {
-                color.push(annotation.notes.ApEinfo_fwdcolor[0])
-            } else if (!annotation.forward && annotation.notes.ApEinfo_revcolor) {
-                color.push(annotation.notes.ApEinfo_revcolor[0])
-            } else {
-                color.push('rgba(0,0,255,0.5)'); // default color
-            }
-        } else {
-            color.push('rgba(0,0,255,0.5)'); // default color
-        }
-        text.push(annotation.name);
+        x.push(annotation.end - annotation.start)
+        y.push(-annotation.yOffset)
+        base.push(annotation.start)
+        color.push(annotationColor(annotation))
+        customdata.push([
+            annotation.name ?? annotation.type ?? 'unnamed',
+            annotation.id ?? 'n/a',
+            // GenBank coordinates: 1-based, inclusive
+            annotation.start + 1,
+            annotation.end,
+            annotation.forward ? 'plus (+)' : 'minus (-)'
+        ])
     }
+
+    // The visible box is drawn as an arrow shape; the bars stay for hover and click.
     return {
-        x, y, base, text, type: 'bar', orientation: 'h', marker: { color },
-        hovertemplate: '%{text} [%{base} - %{x}]'
-    };
+        x, y, base, customdata, type: 'bar', orientation: 'h',
+        marker: { color, opacity: 0 },
+        hovertemplate: '<b>%{customdata[0]}</b><br>ID: %{customdata[1]}<br>' +
+            'Coordinates: %{customdata[2]}..%{customdata[3]}<br>' +
+            'Strand: %{customdata[4]}<extra></extra>'
+    }
 }
