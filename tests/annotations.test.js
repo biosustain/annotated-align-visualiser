@@ -25,6 +25,22 @@ describe('makeAnnotationEndsExclusive', () => {
 })
 
 describe('buildBasecallRefPositions', () => {
+    it('reads refpos from tracy as the 1-based position of the first reference column', () => {
+        // Given an alignment whose reference row starts at the first base of
+        // the reference, which tracy writes as refpos 1
+        const alignment = {
+            refpos: 1,
+            refalign: 'ACGT',
+            gappedTrace: { leadingGaps: 0, basecallPos: [5, 9] }
+        }
+
+        // When reference positions are built
+        const refPositions = buildBasecallRefPositions(alignment)
+
+        // Then the first basecall sits at 0-based position 0
+        assert.deepEqual(refPositions, [0, 1])
+    })
+
     const alignment = {
         refpos: 100,
         refalign: 'AC-GT',
@@ -38,7 +54,7 @@ describe('buildBasecallRefPositions', () => {
         const refPositions = buildBasecallRefPositions(alignment)
 
         // Then the base after the gap continues from the base before it
-        assert.deepEqual(refPositions, [101, 102, 102, 103])
+        assert.deepEqual(refPositions, [100, 101, 101, 102])
     })
 })
 
@@ -56,16 +72,16 @@ describe('axis translation', () => {
         // When the x range starts just after the base drawn at x 8
         const range = translateMainAxisRangeToAnnotation(alignment, [8.5, 19])
 
-        // Then that base is left out: the range starts at the next base, 102,
-        // and ends before the base drawn at x 19, 103
-        assert.deepEqual(range, [102, 103])
+        // Then that base is left out: the range starts at the next base, 101,
+        // and ends before the base drawn at x 19, 102
+        assert.deepEqual(range, [101, 102])
     })
 
     it('maps a reference range back to trace positions', () => {
         // Given the same alignment
 
-        // When the reference range 101..103 is translated
-        const range = translateAnnotationRangeToMainAxis(alignment, [101, 103])
+        // When the reference range 100..102 is translated
+        const range = translateAnnotationRangeToMainAxis(alignment, [100, 102])
 
         // Then it lands on the x of those bases, where they are drawn
         assert.deepEqual(range, [8, 19])

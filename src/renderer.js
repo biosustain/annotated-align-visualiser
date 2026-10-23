@@ -61,10 +61,10 @@ const buildAxisDomains = annotationAxisCount => {
 
 // Reference position (0-based) of every basecall. Each alignment column maps
 // to refpos plus the number of reference bases before it, so `-` gaps in the
-// reference row do not advance the index.
+// reference row do not advance the index. tracy writes refpos 1-based.
 export const buildBasecallRefPositions = ({ refpos, refalign, gappedTrace }) => {
     const refPositionByColumn = []
-    let nextRefPosition = refpos
+    let nextRefPosition = refpos - 1
     for (const base of refalign) {
         refPositionByColumn.push(nextRefPosition)
         if (base !== '-') {
