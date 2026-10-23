@@ -6,6 +6,8 @@ import {
     REFERENCE_ROW_BOTTOM_PX,
     REFERENCE_ROW_START_LABEL_INDEX,
     REFERENCE_ROW_END_LABEL_INDEX,
+    ARROW_SHAPE_NAME,
+    buildAnnotationArrowPaths,
     translateAnnotationRangeToMainAxis,
     translateMainAxisRangeToAnnotation
 } from './renderer'
@@ -210,6 +212,49 @@ const updateReferenceRowLabels = xRange => {
     setReferenceRowLabel(REFERENCE_ROW_END_LABEL_INDEX, `${end}`)
 }
 
+// Arrow heads keep a fixed pixel size, so their paths are rebuilt for the new
+// annotation range. Folded into the axis-sync relayout that runs anyway.
+const arrowShapeUpdates = annotationRange => {
+    const plotWidthPx = figure._fullLayout?.xaxis3?._length
+    if (!plotWidthPx) {
+        return {}
+    }
+
+    const annotationSpan = Math.abs(annotationRange[1] - annotationRange[0])
+    const basesPerPixel = annotationSpan / plotWidthPx
+    const arrowPaths = buildAnnotationArrowPaths(
+        state.annotationData?.parsedSequence, basesPerPixel)
+    const arrowShapeIndexes = figure.layout.shapes.flatMap((shape, index) =>
+        shape.name === ARROW_SHAPE_NAME ? [index] : [])
+
+    return Object.fromEntries(arrowShapeIndexes.map((shapeIndex, arrowIndex) =>
+        [`shapes[${shapeIndex}].path`, arrowPaths[arrowIndex]]))
+}
+
+// Arrows are layout shapes, which the legend does not control. Each annotation
+// type has its own y-axis, so an arrow follows the legend entry that shares it.
+const syncArrowVisibility = () => {
+    const shapes = figure.layout?.shapes ?? []
+    const hiddenAnnotationAxes = new Set(figure.data
+        .filter(trace => trace.xaxis === 'x3' && !isTraceVisible(trace))
+        .map(trace => trace.yaxis))
+
+    const updates = {}
+    shapes.forEach((shape, index) => {
+        if (shape.name !== ARROW_SHAPE_NAME) {
+            return
+        }
+        const shouldBeVisible = !hiddenAnnotationAxes.has(shape.yref)
+        if ((shape.visible !== false) !== shouldBeVisible) {
+            updates[`shapes[${index}].visible`] = shouldBeVisible
+        }
+    })
+
+    if (Object.keys(updates).length > 0) {
+        plotly.relayout(figure, updates)
+    }
+}
+
 const refreshForPlotWidth = () => {
     const xRange = figure._fullLayout?.xaxis?.range
     if (!xRange) {
@@ -217,6 +262,14 @@ const refreshForPlotWidth = () => {
     }
     applyTickDensityForRange(xRange)
     updateReferenceRowLabels(xRange)
+
+    const annotationRange = figure._fullLayout?.xaxis3?.range
+    if (hasAnnotationAxis() && annotationRange) {
+        const updates = arrowShapeUpdates(annotationRange)
+        if (Object.keys(updates).length > 0) {
+            return plotly.relayout(figure, updates)
+        }
+    }
 }
 
 const hasAnnotationAxis = () => figure.data.some(trace => trace.xaxis === 'x3')
@@ -328,7 +381,7 @@ const attachFigureInteractions = () => {
     let disableNextAxisSync = false
     figure.on('plotly_relayout', eventData => {
         // A window resize keeps the ranges but changes the pixel width, which
-        // tick density and the end labels depend on.
+        // tick density, the end labels and the arrow-head size depend on.
         if (eventData?.autosize) {
             return refreshForPlotWidth()
         }
@@ -350,7 +403,8 @@ const attachFigureInteractions = () => {
             const annotationRange =
                 translateMainAxisRangeToAnnotation(state.currentData, xRange)
             return plotly.relayout(figure, {
-                'xaxis3.range': annotationRange
+                'xaxis3.range': annotationRange,
+                ...arrowShapeUpdates(annotationRange)
             })
         }
         const x3Range = getRangeFromRelayout('xaxis3', eventData)
@@ -370,6 +424,7 @@ const attachFigureInteractions = () => {
 
     figure.on('plotly_restyle', () => {
         syncAuxYAxisVisibility()
+        syncArrowVisibility()
     })
 
     figureInteractionsAttached = true

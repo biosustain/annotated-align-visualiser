@@ -1,7 +1,7 @@
 import { getYOffsetsForPotentiallyCircularRanges } from "@teselagen/range-utils";
 import { annotationTypes } from "@teselagen/sequence-utils";
 
-const buildAnnotationFigureData = annotationData => {
+const buildAnnotationFigureData = (annotationData, basesPerPixel) => {
     const yaxes = []
     const traces = []
     const shapes = []
@@ -25,7 +25,7 @@ const buildAnnotationFigureData = annotationData => {
             name: annotationType,
         })
         shapes.push(...annotations.map(annotation =>
-            annotationToArrowShape(annotation, `y${yaxisIdx}`)))
+            annotationToArrowShape(annotation, `y${yaxisIdx}`, basesPerPixel)))
         yaxes.push({
             title: {
                 text: annotationType
@@ -349,11 +349,21 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         basecallPos[Math.min(2 * window_size, lastBasecallIndex)]
     ].map(pos => pos - 1)
 
+    // The plot width is not known until Plotly lays it out, so the first arrow
+    // heads use the figure width minus Plotly's default 80px side margins;
+    // main.js redraws them at the exact size on every zoom.
+    const initialAnnotationRange =
+        translateMainAxisRangeToAnnotation(raw_data, ref_pos_range)
+    const estimatedPlotWidthPx = Math.max(figure.clientWidth - 160, 1)
+    const initialAnnotationSpan =
+        initialAnnotationRange[1] - initialAnnotationRange[0]
+    const initialBasesPerPixel = initialAnnotationSpan / estimatedPlotWidthPx
+
     const {
         traces: annotationTraces,
         yaxes: annotationYAxes,
         shapes: annotationShapes
-    } = buildAnnotationFigureData(annotationData)
+    } = buildAnnotationFigureData(annotationData, initialBasesPerPixel)
     data.push(...annotationTraces)
 
     const { mainPlotDomain, annotationDomains } = buildAxisDomains(annotationYAxes.length)
@@ -428,7 +438,7 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         },
         xaxis3: {
             visible: false,
-            range: translateMainAxisRangeToAnnotation(raw_data, ref_pos_range),
+            range: initialAnnotationRange,
             // Its drag strip would otherwise overlap the subplot below and
             // swallow that subplot's hover events.
             fixedrange: true,
@@ -472,7 +482,8 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
 }
 
 const DEFAULT_ANNOTATION_COLOR = 'rgba(0,0,255,0.5)'
-const ARROW_HEAD_LENGTH = 10
+const ARROW_HEAD_LENGTH_PX = 10
+export const ARROW_SHAPE_NAME = 'annotation-arrow'
 const ARROW_HALF_HEIGHT = 0.4
 
 const annotationColor = annotation => {
@@ -481,26 +492,42 @@ const annotationColor = annotation => {
 }
 
 // A box whose tip points right on the plus strand and left on the minus strand.
-const annotationToArrowShape = (annotation, yref) => {
+// The head is a fixed number of pixels, so its length in bases depends on the
+// zoom; it never takes more than half the feature.
+const arrowPath = (annotation, basesPerPixel) => {
     const { start, end } = annotation
     const centerY = -annotation.yOffset
     const top = centerY + ARROW_HALF_HEIGHT
     const bottom = centerY - ARROW_HALF_HEIGHT
-    const headLength = Math.min(ARROW_HEAD_LENGTH, (end - start) / 2)
+    const headLength = Math.min(ARROW_HEAD_LENGTH_PX * basesPerPixel, (end - start) / 2)
 
-    const path = annotation.forward
+    return annotation.forward
         ? `M ${start},${bottom} L ${end - headLength},${bottom} L ${end},${centerY} L ${end - headLength},${top} L ${start},${top} Z`
         : `M ${end},${bottom} L ${start + headLength},${bottom} L ${start},${centerY} L ${start + headLength},${top} L ${end},${top} Z`
+}
 
+const annotationToArrowShape = (annotation, yref, basesPerPixel) => {
     return {
         type: 'path',
-        path,
+        name: ARROW_SHAPE_NAME,
+        path: arrowPath(annotation, basesPerPixel),
         xref: 'x3',
         yref,
         fillcolor: annotationColor(annotation),
         line: { width: 0 },
         layer: 'above'
     }
+}
+
+// Arrow paths for a new zoom level, in the same order as the arrow shapes
+// buildAnnotationFigureData puts in the layout.
+export const buildAnnotationArrowPaths = (annotationData, basesPerPixel) => {
+    if (!annotationData) {
+        return []
+    }
+    return annotationTypes
+        .flatMap(annotationType => annotationData[annotationType] ?? [])
+        .map(annotation => arrowPath(annotation, basesPerPixel))
 }
 
 const annotationsToBarTrace = (annotations) => {
