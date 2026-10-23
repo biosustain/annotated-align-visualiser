@@ -523,6 +523,24 @@ const annotationToArrowShape = (annotation, yref, basesPerPixel) => {
     }
 }
 
+// A pan shifts the bases in view by a base or so, which changes the arrow
+// heads by well under a pixel. Re-sending the arrow paths makes Plotly replot
+// the whole figure, so they are only redrawn once the zoom has moved further.
+// With 20 or fewer bases in view, one base is more than this, so panning there
+// still redraws them every time.
+const ARROW_REDRAW_ZOOM_TOLERANCE = 0.05
+
+// drawnBasesPerPixel is null until the arrows are drawn at a measured width.
+// A NaN from an unmeasurable span must not stop later redraws either.
+export const arrowHeadsNeedRedraw = (drawnBasesPerPixel, basesPerPixel) => {
+    if (!Number.isFinite(drawnBasesPerPixel)) {
+        return true
+    }
+    const zoomChange =
+        Math.abs(basesPerPixel - drawnBasesPerPixel) / drawnBasesPerPixel
+    return zoomChange > ARROW_REDRAW_ZOOM_TOLERANCE
+}
+
 // Arrow paths for a new zoom level, in the same order as the arrow shapes
 // buildAnnotationFigureData puts in the layout.
 export const buildAnnotationArrowPaths = (annotationData, basesPerPixel) => {

@@ -7,6 +7,7 @@ import {
     REFERENCE_ROW_START_LABEL_INDEX,
     REFERENCE_ROW_END_LABEL_INDEX,
     ARROW_SHAPE_NAME,
+    arrowHeadsNeedRedraw,
     buildAnnotationArrowPaths,
     translateAnnotationRangeToMainAxis,
     translateMainAxisRangeToAnnotation
@@ -35,7 +36,9 @@ const state = {
     annotationData: null,
     showAnnotationJson: true,
     tickSets: null,
-    activeTickDensity: 'all'
+    activeTickDensity: 'all',
+    // Zoom level the arrow heads were last drawn at.
+    arrowBasesPerPixel: null
 }
 
 const elements = {
@@ -213,7 +216,9 @@ const updateReferenceRowLabels = xRange => {
 }
 
 // Arrow heads keep a fixed pixel size, so their paths are rebuilt for the new
-// annotation range. Folded into the axis-sync relayout that runs anyway.
+// annotation range once the zoom has changed enough to matter. Folded into the
+// axis-sync relayout that runs anyway, which is why the new zoom level is
+// recorded here.
 const arrowShapeUpdates = annotationRange => {
     const plotWidthPx = figure._fullLayout?.xaxis3?._length
     if (!plotWidthPx) {
@@ -222,6 +227,11 @@ const arrowShapeUpdates = annotationRange => {
 
     const annotationSpan = Math.abs(annotationRange[1] - annotationRange[0])
     const basesPerPixel = annotationSpan / plotWidthPx
+    if (!arrowHeadsNeedRedraw(state.arrowBasesPerPixel, basesPerPixel)) {
+        return {}
+    }
+    state.arrowBasesPerPixel = basesPerPixel
+
     const arrowPaths = buildAnnotationArrowPaths(
         state.annotationData?.parsedSequence, basesPerPixel)
     const arrowShapeIndexes = figure.layout.shapes.flatMap((shape, index) =>
@@ -468,6 +478,8 @@ const renderData = (data) => {
     state.currentData = data
     state.tickSets = buildTickSets(data)
     state.activeTickDensity = 'all'
+    // The new figure's arrows are drawn with an estimated plot width.
+    state.arrowBasesPerPixel = null
     renderAlignment(figure, data, plotly, state.annotationData?.parsedSequence)
     attachFigureInteractions()
     syncAuxYAxisVisibility()
