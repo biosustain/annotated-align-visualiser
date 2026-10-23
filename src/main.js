@@ -1,5 +1,14 @@
 import './main.css'
-import { renderAlignment, translateAnnotationRangeToMainAxis, translateMainAxisRangeToAnnotation } from './renderer'
+import {
+    renderAlignment,
+    buildBasecallTickText,
+    referenceRangeLabels,
+    REFERENCE_ROW_BOTTOM_PX,
+    REFERENCE_ROW_START_LABEL_INDEX,
+    REFERENCE_ROW_END_LABEL_INDEX,
+    translateAnnotationRangeToMainAxis,
+    translateMainAxisRangeToAnnotation
+} from './renderer'
 import { parseAnnotationFile, formatJsonForDisplay } from './parsers'
 import "https://cdn.plot.ly/plotly-3.4.0.min.js"
 
@@ -76,21 +85,20 @@ const syncAuxYAxisVisibility = () => {
     })
 }
 
-const sampleTickSet = (tickvals, ticktext, step) => {
-    return {
-        tickvals: tickvals.filter((_, index) => index % step === 0),
-        ticktext: ticktext.filter((_, index) => index % step === 0)
-    }
-}
-
 const buildTickSets = data => {
-    const tickvals = data.gappedTrace.basecallPos
-    const ticktext = tickvals.map(pos => data.gappedTrace.basecalls[pos])
+    const basecallPos = data.gappedTrace.basecallPos
+    // Same `pos - 1` x as the traces in renderer.js.
+    const tickvals = basecallPos.map(pos => pos - 1)
+    const ticktext = buildBasecallTickText(data)
+
+    // Blank labels instead of hiding them, so the axis keeps its position.
+    // Only every 10th tick is kept: each tick costs layout work on every pan.
+    const thinnedTickvals = tickvals.filter((_, index) => index % 10 === 0)
+    const blankTicktext = thinnedTickvals.map(() => ' <br> ')
 
     return {
         all: { tickvals, ticktext },
-        every10th: sampleTickSet(tickvals, ticktext, 10),
-        every100th: sampleTickSet(tickvals, ticktext, 100)
+        none: { tickvals: thinnedTickvals, ticktext: blankTicktext }
     }
 }
 
@@ -115,23 +123,29 @@ const getRangeFromRelayout = (axis, relayoutData) => {
     return null
 }
 
+// One letter plus a small gap. Most labels are a single base; a double call
+// like "T|A" may touch its neighbours, which is accepted while the single
+// letters stay readable.
+const MIN_PIXELS_BETWEEN_TICK_LABELS = 10
+
+// Labels are shown only while neighbouring ticks are far enough apart.
 const pickTickDensity = xRange => {
-    if (!Array.isArray(xRange) || xRange.length !== 2) {
+    const tickvals = state.tickSets?.all.tickvals
+    const plotWidthPx = figure?._fullLayout?.xaxis?._length
+    const hasRange = Array.isArray(xRange) && xRange.length === 2
+    if (!hasRange || !tickvals?.length || !plotWidthPx) {
         return 'all'
     }
 
     const span = Math.abs(Number(xRange[1]) - Number(xRange[0]))
-    if (!Number.isFinite(span)) {
+    const tickvalsSpan = tickvals.at(-1) - tickvals[0]
+    const averageTickSpacing = tickvalsSpan / Math.max(tickvals.length - 1, 1)
+    if (!Number.isFinite(span) || !(averageTickSpacing > 0)) {
         return 'all'
     }
 
-    if (span > 5000) {
-        return 'every100th'
-    }
-    if (span > 1000) {
-        return 'every10th'
-    }
-    return 'all'
+    const pixelsBetweenTicks = (averageTickSpacing / span) * plotWidthPx
+    return pixelsBetweenTicks >= MIN_PIXELS_BETWEEN_TICK_LABELS ? 'all' : 'none'
 }
 
 const applyTickDensityForRange = xRange => {
@@ -158,6 +172,54 @@ const applyTickDensityForRange = xRange => {
         isApplyingTickDensity = false
     })
 }
+
+// Each label is anchored to the edge facing away from the plot.
+const REFERENCE_ROW_LABEL_ANCHORS = {
+    [REFERENCE_ROW_START_LABEL_INDEX]: 'end',
+    [REFERENCE_ROW_END_LABEL_INDEX]: 'start'
+}
+
+// Writes the text straight into the drawn annotation, because a relayout
+// redraws the whole figure and doubled the cost of every pan. Both layouts are
+// updated too: axis-range relayouts redraw annotations from _fullLayout, full
+// redraws rebuild it from layout.
+const setReferenceRowLabel = (annotationIndex, text) => {
+    figure.layout.annotations[annotationIndex].text = text
+    figure._fullLayout.annotations[annotationIndex].text = text
+
+    const textElement = figure.querySelector(
+        `.annotation[data-index="${annotationIndex}"] .annotation-text`)
+    if (!textElement) {
+        return
+    }
+
+    // Plotly centres the text in a box sized for the old text. Anchoring it to
+    // the edge facing away from the plot keeps a longer number from growing
+    // into the plot.
+    const anchor = REFERENCE_ROW_LABEL_ANCHORS[annotationIndex]
+    const backgroundBox = textElement.previousElementSibling
+    const boxWidth = Number(backgroundBox?.getAttribute('width') ?? 0)
+    textElement.setAttribute('text-anchor', anchor)
+    textElement.setAttribute('x', anchor === 'end' ? boxWidth : 0)
+    textElement.textContent = text
+}
+
+const updateReferenceRowLabels = xRange => {
+    const { start, end } = referenceRangeLabels(state.currentData, xRange)
+    setReferenceRowLabel(REFERENCE_ROW_START_LABEL_INDEX, `${start}`)
+    setReferenceRowLabel(REFERENCE_ROW_END_LABEL_INDEX, `${end}`)
+}
+
+const refreshForPlotWidth = () => {
+    const xRange = figure._fullLayout?.xaxis?.range
+    if (!xRange) {
+        return
+    }
+    applyTickDensityForRange(xRange)
+    updateReferenceRowLabels(xRange)
+}
+
+const hasAnnotationAxis = () => figure.data.some(trace => trace.xaxis === 'x3')
 
 const getAnnotationRangeFromClickPoint = (point) => {
     const yaxisName = point?.data?.yaxis
@@ -187,10 +249,68 @@ const getAnnotationRangeFromClickPoint = (point) => {
     return [Math.min(start, end), Math.max(start, end)]
 }
 
+const nearestIndex = (values, target) => {
+    let bestIndex = 0
+    for (let index = 1; index < values.length; index++) {
+        const distance = Math.abs(values[index] - target)
+        if (distance < Math.abs(values[bestIndex] - target)) {
+            bestIndex = index
+        }
+    }
+    return bestIndex
+}
+
+// Plotly only detects hover inside the plot area, and the basecall and
+// reference letters sit below it. Over that strip, the Basecall trace's
+// tooltip is shown for the nearest base.
+let hoveredLetterPoint = null
+
+const clearLetterStripTooltip = () => {
+    if (hoveredLetterPoint !== null) {
+        plotly.Fx.unhover(figure)
+        hoveredLetterPoint = null
+    }
+}
+
+const showBasecallTooltipOverLetters = event => {
+    const xaxis = figure._fullLayout?.xaxis
+    const yaxis = figure._fullLayout?.yaxis
+    const basecallTraceIndex = figure.data
+        ?.findIndex(trace => trace.name === 'Basecall') ?? -1
+    if (!xaxis || !yaxis || basecallTraceIndex === -1) {
+        return
+    }
+
+    const figureBox = figure.getBoundingClientRect()
+    const xInPlot = event.clientX - figureBox.left - xaxis._offset
+    const axisBottom = yaxis._offset + yaxis._length
+    const yBelowAxis = event.clientY - figureBox.top - axisBottom
+    const isOverLetterStrip = xInPlot >= 0 && xInPlot <= xaxis._length &&
+        yBelowAxis > 0 && yBelowAxis <= REFERENCE_ROW_BOTTOM_PX
+
+    if (!isOverLetterStrip) {
+        clearLetterStripTooltip()
+        return
+    }
+
+    const basecallXs = figure.data[basecallTraceIndex].x
+    const pointNumber = nearestIndex(basecallXs, xaxis.p2d(xInPlot))
+    // Redrawing the same tooltip on every pixel of movement is wasted work.
+    if (pointNumber === hoveredLetterPoint) {
+        return
+    }
+    const point = { curveNumber: basecallTraceIndex, pointNumber }
+    plotly.Fx.hover(figure, [point], 'x2y3')
+    hoveredLetterPoint = pointNumber
+}
+
 const attachFigureInteractions = () => {
     if (figureInteractionsAttached || typeof figure?.on !== 'function') {
         return
     }
+
+    figure.addEventListener('mousemove', showBasecallTooltipOverLetters)
+    figure.addEventListener('mouseleave', clearLetterStripTooltip)
 
     figure.on('plotly_click', eventData => {
         const point = eventData?.points?.[0]
@@ -207,17 +327,30 @@ const attachFigureInteractions = () => {
 
     let disableNextAxisSync = false
     figure.on('plotly_relayout', eventData => {
+        // A window resize keeps the ranges but changes the pixel width, which
+        // tick density and the end labels depend on.
+        if (eventData?.autosize) {
+            return refreshForPlotWidth()
+        }
+
         const xRange = getRangeFromRelayout('xaxis', eventData)
         if (xRange) {
             applyTickDensityForRange(xRange)
+            updateReferenceRowLabels(xRange)
             if (disableNextAxisSync) {
                 disableNextAxisSync = false
                 return
             }
+            // Without an annotation file there is no annotation axis to sync.
+            if (!hasAnnotationAxis()) {
+                return
+            }
             disableNextAxisSync = true
             // Scale annotation x-axis to match the new x-axis range
+            const annotationRange =
+                translateMainAxisRangeToAnnotation(state.currentData, xRange)
             return plotly.relayout(figure, {
-                'xaxis3.range': translateMainAxisRangeToAnnotation(state.currentData, xRange)
+                'xaxis3.range': annotationRange
             })
         }
         const x3Range = getRangeFromRelayout('xaxis3', eventData)
@@ -229,7 +362,8 @@ const attachFigureInteractions = () => {
             disableNextAxisSync = true
             // Scale x-axis to fit the annotation x-axis range
             return plotly.relayout(figure, {
-                'xaxis.range': translateAnnotationRangeToMainAxis(state.currentData, x3Range)
+                'xaxis.range':
+                    translateAnnotationRangeToMainAxis(state.currentData, x3Range)
             })
         }
     })
@@ -342,10 +476,9 @@ const handleAnnotationUpload = async (event) => {
         state.showAnnotationJson = true
         updateAnnotationView()
 
+        // renderData also resets the tick density the new figure starts with.
         if (state.currentData) {
-            renderAlignment(figure, state.currentData, plotly, state.annotationData.parsedSequence)
-            attachFigureInteractions()
-            syncAuxYAxisVisibility()
+            renderData(state.currentData)
         }
     } catch (error) {
         console.error('Upload error:', error)

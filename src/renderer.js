@@ -76,6 +76,30 @@ export const buildBasecallRefPositions = ({ refpos, refalign, gappedTrace }) => 
         refPositionByColumn[basecallIndex + gappedTrace.leadingGaps])
 }
 
+// Tick labels show only the called base(s). The basecall text from the file
+// starts with its trace index ("11:A"), which is shown in the tooltips instead.
+const basecallIndexOf = basecall => basecall.slice(0, basecall.indexOf(':'))
+
+const basecallLetters = data => {
+    return data.gappedTrace.basecallPos.map(pos => {
+        const basecall = data.gappedTrace.basecalls[pos]
+        return basecall.slice(basecall.indexOf(':') + 1)
+    })
+}
+
+const referenceLetters = data => {
+    return data.gappedTrace.basecallPos.map((_, index) =>
+        data.refalign[index + data.gappedTrace.leadingGaps])
+}
+
+// Two-line tick labels: the called base, with the aligned reference base below.
+export const buildBasecallTickText = data => {
+    const calledBases = basecallLetters(data)
+    const referenceBases = referenceLetters(data)
+    return calledBases.map((calledBase, index) =>
+        `${calledBase}<br>${referenceBases[index]}`)
+}
+
 const refPositionAtBasecallIndex = (refPositions, basecallIndex) => {
     const lastIndex = refPositions.length - 1
     if (basecallIndex > lastIndex) {
@@ -84,16 +108,20 @@ const refPositionAtBasecallIndex = (refPositions, basecallIndex) => {
     return refPositions[basecallIndex]
 }
 
+// Every trace draws a basecall one sample before its basecallPos.
+export const basecallXsOf = data =>
+    data.gappedTrace.basecallPos.map(pos => pos - 1)
+
 export const translateMainAxisRangeToAnnotation = (data, [start, end]) => {
-    const { gappedTrace: { basecallPos } } = data
+    const basecallXs = basecallXsOf(data)
     const refPositions = buildBasecallRefPositions(data)
-    const traceLength = basecallPos.length
+    const traceLength = basecallXs.length
     let startIndex = 0
-    while (startIndex < traceLength && basecallPos[startIndex] < start) {
+    while (startIndex < traceLength && basecallXs[startIndex] < start) {
         startIndex++
     }
     let endIndex = startIndex
-    while (endIndex < traceLength && basecallPos[endIndex] < end) {
+    while (endIndex < traceLength && basecallXs[endIndex] < end) {
         endIndex++
     }
     return [
@@ -103,18 +131,102 @@ export const translateMainAxisRangeToAnnotation = (data, [start, end]) => {
 }
 
 export const translateAnnotationRangeToMainAxis = (data, [start, end]) => {
-    const { gappedTrace: { basecallPos } } = data
+    const basecallXs = basecallXsOf(data)
     const refPositions = buildBasecallRefPositions(data)
-    const lastIndex = basecallPos.length - 1
+    const lastIndex = basecallXs.length - 1
     const indexOfRefPosition = refPosition => {
         const index = refPositions.findIndex(position => position >= refPosition)
         return index === -1 ? lastIndex : index
     }
     return [
-        basecallPos[indexOfRefPosition(start)],
-        basecallPos[indexOfRefPosition(end)]
+        basecallXs[indexOfRefPosition(start)],
+        basecallXs[indexOfRefPosition(end)]
     ]
 }
+
+// A box is centred on its basecall and reaches halfway to the nearer
+// neighbour on both sides, so it never overlaps a neighbouring box. The first
+// and last basecalls only have one neighbour to go by.
+const basecallBoxWidth = (basecallXs, basecallIndex) => {
+    const x = basecallXs[basecallIndex]
+    const previousX = basecallXs[basecallIndex - 1]
+    const nextX = basecallXs[basecallIndex + 1]
+
+    const neighbourDistances = []
+    if (previousX !== undefined) neighbourDistances.push(x - previousX)
+    if (nextX !== undefined) neighbourDistances.push(nextX - x)
+
+    // A lone basecall has no neighbour; give it one sample.
+    return neighbourDistances.length > 0 ? Math.min(...neighbourDistances) : 1
+}
+
+// The reference letters are the second line of each tick label. These are
+// pixel offsets below the x-axis line spanning that line.
+const REFERENCE_ROW_TOP_PX = 16
+export const REFERENCE_ROW_BOTTOM_PX = 34
+
+const MISMATCH_COLOR = 'rgba(200,0,0,.6)'
+const SECONDARY_MATCH_COLOR = 'rgba(200,150,0,.6)'
+
+// Coloured cells below the axis, running from the axis line through the
+// basecall and reference letters. They share the bar colours, so a toggled-on
+// bar and its cell read as one highlight. All cells of one colour form a single
+// path shape: Plotly redraws every shape on each pan, and hundreds of separate
+// shapes made panning noticeably slower.
+const referenceCellsShape = (basecallXs, basecallIndexes, color) => {
+    const top = 0
+    const bottom = -REFERENCE_ROW_BOTTOM_PX
+    const cellPaths = basecallIndexes.map(basecallIndex => {
+        const x = basecallXs[basecallIndex]
+        const halfWidth = basecallBoxWidth(basecallXs, basecallIndex) / 2
+        const left = x - halfWidth
+        const right = x + halfWidth
+        return `M ${left},${top} L ${right},${top} L ${right},${bottom} L ${left},${bottom} Z`
+    })
+
+    return {
+        type: 'path',
+        path: cellPaths.join(' '),
+        xref: 'x',
+        yref: 'paper',
+        ysizemode: 'pixel',
+        yanchor: 0,
+        fillcolor: color,
+        line: { width: 0 },
+        layer: 'below'
+    }
+}
+
+// Reference positions (1-based, inclusive) of the first and last base in view,
+// shown at either end of the reference row.
+export const referenceRangeLabels = (data, xRange) => {
+    const [startPosition, endPosition] =
+        translateMainAxisRangeToAnnotation(data, xRange)
+    // Past the last base both ends extrapolate to the same position, which
+    // would put the start one after the end.
+    const start = Math.min(startPosition + 1, endPosition)
+    return { start, end: endPosition }
+}
+
+// The start and end labels are the first two layout annotations; main.js
+// updates their text on zoom.
+export const REFERENCE_ROW_START_LABEL_INDEX = 0
+export const REFERENCE_ROW_END_LABEL_INDEX = 1
+
+// Annotation sitting just outside the plot, level with the reference row.
+const referenceRowEndLabel = (side, text) => ({
+    xref: 'paper',
+    x: side === 'start' ? 0 : 1,
+    xanchor: side === 'start' ? 'right' : 'left',
+    xshift: side === 'start' ? -6 : 6,
+    yref: 'paper',
+    y: 0,
+    yshift: -(REFERENCE_ROW_TOP_PX + REFERENCE_ROW_BOTTOM_PX) / 2,
+    yanchor: 'middle',
+    text: `${text}`,
+    showarrow: false,
+    font: { family: 'monospace', size: 12 }
+})
 
 export const renderAlignment = (figure, raw_data, Plotly, annotationData = null) => {
     const colorMapFactory = opacity => ({
@@ -140,6 +252,9 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         x: raw_data.gappedTrace.basecallPos.map(pos => pos - 1),
         y: raw_data.gappedTrace.basecallQual,
         // text: decom.map(([_, prim]) => prim),
+        customdata: raw_data.gappedTrace.basecallPos.map(
+            pos => raw_data.gappedTrace.basecalls[pos]),
+        hovertemplate: 'Basecall %{customdata}<br>Quality %{y}<extra></extra>',
         yaxis: 'y2',
         type: 'bar',
         xaxis: 'x2',
@@ -149,9 +264,9 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         visible: 'legendonly'
     })
 
-    // Collect mismatch positions by type
-    const noMatchPositions = [];
-    const secondaryMatchPositions = [];
+    // Collect the basecall index of each mismatch, by type
+    const noMatchIndexes = [];
+    const secondaryMatchIndexes = [];
 
     raw_data.gappedTrace.basecallPos.forEach((pos, index) => {
         const text = raw_data.gappedTrace.basecalls[pos];
@@ -163,68 +278,82 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             if (!(align == prim && align == sec)) {
                 if (align == prim || align == sec) {
                     // Secondary match
-                    secondaryMatchPositions.push(pos - 1);
+                    secondaryMatchIndexes.push(index);
                 } else {
                     // No match
-                    noMatchPositions.push(pos - 1);
+                    noMatchIndexes.push(index);
                 }
             }
         }
     });
 
-    // Add mismatch bars as traces
-    data.push({
-        name: 'Mismatches',
-        x: noMatchPositions,
-        y: noMatchPositions.map(() => 1),
-        type: 'bar',
-        xaxis: 'x2',
-        marker: { color: 'rgba(200,0,0,.6)' },
-        yaxis: 'y3',
-        hoverinfo: 'x+name',
-        visible: 'legendonly'
-    });
+    const allBasecallXs = basecallXsOf(raw_data)
 
-    data.push({
-        name: 'Secondary Match',
-        x: secondaryMatchPositions,
-        y: secondaryMatchPositions.map(() => 1),
-        type: 'bar',
-        xaxis: 'x2',
-        marker: { color: 'rgba(200,150,0,.6)' },
-        yaxis: 'y3',
-        hoverinfo: 'x+name',
-        visible: 'legendonly'
-    });
+    const buildMatchBarTrace = (name, basecallIndexes, color) => {
+        return {
+            name,
+            x: basecallIndexes.map(index => allBasecallXs[index]),
+            width: basecallIndexes.map(index => basecallBoxWidth(allBasecallXs, index)),
+            y: basecallIndexes.map(() => 1),
+            hoverinfo: 'x+name',
+            type: 'bar',
+            xaxis: 'x2',
+            marker: { color },
+            yaxis: 'y3',
+            visible: 'legendonly'
+        }
+    }
+
+    data.push(buildMatchBarTrace('Mismatches', noMatchIndexes, MISMATCH_COLOR));
+    data.push(buildMatchBarTrace('Secondary Match', secondaryMatchIndexes, SECONDARY_MATCH_COLOR));
 
     const refPositions = buildBasecallRefPositions(raw_data)
     const basecallPos = raw_data.gappedTrace.basecallPos
+    const calledBases = basecallLetters(raw_data)
+    const referenceBases = referenceLetters(raw_data)
 
+    const referenceCellShapes = [
+        referenceCellsShape(allBasecallXs, noMatchIndexes, MISMATCH_COLOR),
+        referenceCellsShape(allBasecallXs, secondaryMatchIndexes, SECONDARY_MATCH_COLOR)
+    ].filter(shape => shape.path !== '')
+
+    // Plotly cannot attach tooltips to axis tick labels, so invisible markers
+    // along the bottom edge of the plot, above each tick, carry the tooltip.
     data.push({
-        name: 'Reference',
+        name: 'Basecall',
         x: basecallPos.map(pos => pos - 1),
-        y: basecallPos.map(() => 0.03),
-        text: basecallPos.map((_, index) => raw_data.refalign[index + raw_data.gappedTrace.leadingGaps]),
-        customdata: refPositions.map(position => position + 1),
-        mode: 'text',
+        y: basecallPos.map(() => 0),
+        text: calledBases,
+        customdata: basecallPos.map((pos, index) => [
+            refPositions[index] + 1,
+            basecallIndexOf(raw_data.gappedTrace.basecalls[pos]),
+            referenceBases[index]
+        ]),
+        mode: 'markers',
         type: 'scatter',
         xaxis: 'x2',
         yaxis: 'y3',
-        textfont: { family: 'monospace', size: 12 },
-        hovertemplate: 'ref position %{customdata}<extra></extra>',
+        marker: { size: 16, opacity: 0 },
+        hovertemplate: 'Basecall %{text}<br>' +
+            'Basecall index %{customdata[1]}<br>' +
+            'Reference sequence position %{customdata[0]}<br>' +
+            'Reference %{customdata[2]}<extra></extra>',
         showlegend: false
     })
 
-    // The marker sits on the first aligned base; the view opens around it.
+    // The view opens on the first aligned bases.
     const window_size = 20
     const lastBasecallIndex = basecallPos.length - 1
     const ref_pos_range = [
         basecallPos[0],
         basecallPos[Math.min(2 * window_size, lastBasecallIndex)]
     ].map(pos => pos - 1)
-    const ref_pos = basecallPos[0] - 1
 
-    const { traces: annotationTraces, yaxes: annotationYAxes, shapes: annotationShapes } = buildAnnotationFigureData(annotationData)
+    const {
+        traces: annotationTraces,
+        yaxes: annotationYAxes,
+        shapes: annotationShapes
+    } = buildAnnotationFigureData(annotationData)
     data.push(...annotationTraces)
 
     const { mainPlotDomain, annotationDomains } = buildAxisDomains(annotationYAxes.length)
@@ -245,6 +374,8 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             }]
         }],
     }];
+
+    const initialReferenceLabels = referenceRangeLabels(raw_data, ref_pos_range)
 
     const layout = {
         title: (raw_data.refchr ?? 'Unnamed') + (raw_data.forward ? ' - forward' : ' - reverse'),
@@ -267,7 +398,8 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             zeroline: false,
             visible: false,
             fixedrange: true,
-            range: [0, 1.05],
+            // Mismatch bars are 1 high, so they fill the plot height exactly.
+            range: [0, 1],
             anchor: 'y'
         },
         legend: {
@@ -279,13 +411,15 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         xaxis: {
             range: [...ref_pos_range],
             tickmode: 'array',
-            tickvals: raw_data.gappedTrace.basecallPos,
-            ticktext: raw_data.gappedTrace.basecallPos.map(pos => raw_data.gappedTrace.basecalls[pos]),
+            // Same `pos - 1` x as the basecall and reference traces, so the
+            // tick labels line up with the reference bases.
+            tickvals: raw_data.gappedTrace.basecallPos.map(pos => pos - 1),
+            ticktext: buildBasecallTickText(raw_data),
             rangeslider: {
                 visible: true
             },
             minallowed: 0,
-            tickangle: 90
+            tickangle: 0
         },
         xaxis2: {
             visible: false,
@@ -300,36 +434,14 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             fixedrange: true,
         },
         shapes: [
-            {
-                type: 'line',
-                x0: ref_pos,
-                y0: 0,
-                x1: ref_pos,
-                yref: 'paper',
-                y1: 1,
-                line: {
-                    color: 'red',
-                    width: 1.5,
-                    dash: 'dot'
-                }
-            },
+            ...referenceCellShapes,
             ...annotationShapes
         ],
-        annotations: [{
-            x: ref_pos,
-            y: 1,
-            xref: 'x',
-            yref: 'paper',
-            text: `ref position ${refPositions[0] + 1}`,
-            showarrow: false,
-            xanchor: 'center',
-            yanchor: 'bottom',
-            ax: 0,
-            ay: -40,
-            font: {
-                color: 'red'
-            }
-        }],
+        // Order must match the REFERENCE_ROW_*_LABEL_INDEX constants.
+        annotations: [
+            referenceRowEndLabel('start', initialReferenceLabels.start),
+            referenceRowEndLabel('end', initialReferenceLabels.end)
+        ],
         ...Object.fromEntries(annotationYAxes.map((axis, index) => [
             `yaxis${axis._index}`,
             {

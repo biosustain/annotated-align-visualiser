@@ -50,13 +50,15 @@ describe('axis translation', () => {
     }
 
     it('maps a trace range to reference positions', () => {
-        // Given basecalls at trace positions 5, 9, 14, 20
+        // Given basecalls at trace positions 5, 9, 14, 20, drawn one sample
+        // earlier at x 4, 8, 13, 19
 
-        // When the trace range 9..20 is translated
-        const range = translateMainAxisRangeToAnnotation(alignment, [9, 20])
+        // When the x range starts just after the base drawn at x 8
+        const range = translateMainAxisRangeToAnnotation(alignment, [8.5, 19])
 
-        // Then it covers reference positions 101 and 103
-        assert.deepEqual(range, [101, 103])
+        // Then that base is left out: the range starts at the next base, 102,
+        // and ends before the base drawn at x 19, 103
+        assert.deepEqual(range, [102, 103])
     })
 
     it('maps a reference range back to trace positions', () => {
@@ -65,7 +67,7 @@ describe('axis translation', () => {
         // When the reference range 101..103 is translated
         const range = translateAnnotationRangeToMainAxis(alignment, [101, 103])
 
-        // Then it lands on the trace positions of those bases
-        assert.deepEqual(range, [9, 20])
+        // Then it lands on the x of those bases, where they are drawn
+        assert.deepEqual(range, [8, 19])
     })
 })
