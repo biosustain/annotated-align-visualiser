@@ -760,34 +760,115 @@ const annotationToLabel = (annotation, yref, viewRange, basesPerPixel) => {
     }
 }
 
+// Plotly does not wrap tooltips, and a translation runs to hundreds of
+// residues.
+const TOOLTIP_LINE_LENGTH = 60
+
+// Breaks at spaces where it can; a sequence has none, so it is cut every
+// TOOLTIP_LINE_LENGTH characters.
+const wrapTooltipValue = value => {
+    const lines = []
+    let line = ''
+    for (const word of value.split(' ')) {
+        const candidate = line === '' ? word : `${line} ${word}`
+        if (candidate.length <= TOOLTIP_LINE_LENGTH) {
+            line = candidate
+            continue
+        }
+        if (line !== '') {
+            lines.push(line)
+        }
+        line = word
+        while (line.length > TOOLTIP_LINE_LENGTH) {
+            lines.push(line.slice(0, TOOLTIP_LINE_LENGTH))
+            line = line.slice(TOOLTIP_LINE_LENGTH)
+        }
+    }
+    if (line !== '') {
+        lines.push(line)
+    }
+    return lines
+}
+
+// One line for a short value, or the key on its own line with the value
+// wrapped below it.
+const tooltipEntryLines = (key, value) => {
+    const entry = `${key}: ${value}`
+    if (entry.length <= TOOLTIP_LINE_LENGTH) {
+        return [entry]
+    }
+    return [`${key}:`, ...wrapTooltipValue(value)]
+}
+
+// Plotly reads tooltip text as markup, so text from the file is escaped.
+const escapeTooltipText = text => text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+
+// Fields shown in their own way rather than listed as they are: the name as
+// the title, the location as GenBank coordinates and the strand in words.
+// yOffset is the track row, set by the plot rather than read from the file.
+const FIELDS_NOT_LISTED = new Set(
+    ['name', 'start', 'end', 'forward', 'strand', 'notes', 'yOffset'])
+
+// A field or qualifier can hold one value or several; each non-empty value
+// gets its own entry.
+const tooltipValueTexts = value => {
+    const values = Array.isArray(value) ? value : [value]
+    return values
+        .filter(item => item !== null && item !== undefined)
+        .map(item => typeof item === 'object' ? JSON.stringify(item) : String(item).trim())
+        .filter(text => text !== '')
+}
+
+const tooltipFieldLines = (key, value) => tooltipValueTexts(value)
+    .flatMap(text => tooltipEntryLines(key, text))
+
+// ApE saves how it draws a feature (colours, arrow style) as qualifiers. They
+// say nothing about the element; the colours are used for its box instead.
+const isApeDisplayQualifier = qualifier => qualifier.startsWith('ApEinfo_')
+
+// Built from whatever the parser gives for the feature: every field it sets
+// and every qualifier in its notes, under their own names. Anything the file
+// leaves out is left out here too.
+export const annotationTooltipText = annotation => {
+    // GenBank coordinates: 1-based, inclusive
+    const locationLines = [
+        `Coordinates: ${annotation.start + 1}..${annotation.end}`,
+        `Strand: ${annotation.forward ? 'plus (+)' : 'minus (-)'}`
+    ]
+    const fieldLines = Object.entries(annotation)
+        .filter(([key]) => !FIELDS_NOT_LISTED.has(key))
+        .flatMap(([key, value]) => tooltipFieldLines(key, value))
+    const qualifierLines = Object.entries(annotation.notes ?? {})
+        .filter(([qualifier]) => !isApeDisplayQualifier(qualifier))
+        .flatMap(([qualifier, values]) => tooltipFieldLines(qualifier, values))
+
+    const nameLine = `<b>${escapeTooltipText(annotationName(annotation))}</b>`
+    const entryLines = [...locationLines, ...fieldLines, ...qualifierLines]
+    return [nameLine, ...entryLines.map(escapeTooltipText)].join('<br>')
+}
+
 const annotationsToBarTrace = (annotations) => {
     const x = []
     const y = []
     const base = []
     const color = []
-    const customdata = []
+    const hovertext = []
 
     for (const annotation of annotations) {
         x.push(annotation.end - annotation.start)
         y.push(-annotation.yOffset)
         base.push(annotation.start)
         color.push(annotationColor(annotation))
-        customdata.push([
-            annotationName(annotation),
-            annotation.id ?? 'n/a',
-            // GenBank coordinates: 1-based, inclusive
-            annotation.start + 1,
-            annotation.end,
-            annotation.forward ? 'plus (+)' : 'minus (-)'
-        ])
+        hovertext.push(annotationTooltipText(annotation))
     }
 
     // The visible box is drawn as an arrow shape; the bars stay for hover and click.
     return {
-        x, y, base, customdata, type: 'bar', orientation: 'h',
+        x, y, base, hovertext, type: 'bar', orientation: 'h',
         marker: { color, opacity: 0 },
-        hovertemplate: '<b>%{customdata[0]}</b><br>ID: %{customdata[1]}<br>' +
-            'Coordinates: %{customdata[2]}..%{customdata[3]}<br>' +
-            'Strand: %{customdata[4]}<extra></extra>'
+        hovertemplate: '%{hovertext}<extra></extra>'
     }
 }

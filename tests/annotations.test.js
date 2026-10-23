@@ -5,6 +5,7 @@ import { makeAnnotationEndsExclusive } from '../src/parsers.js'
 import {
     annotationLabelText,
     annotationsInAlignedRegion,
+    annotationTooltipText,
     arrowHeadsNeedRedraw,
     buildAnnotationLabel,
     BASE_FIGURE_HEIGHT_PX,
@@ -423,6 +424,166 @@ describe('annotation labels in the layout', () => {
         const label = renderedLayout.annotations
             .find(annotation => annotation.name === 'annotation-label')
         assert.notEqual(label.visible, false)
+    })
+})
+
+describe('annotationTooltipText', () => {
+    it('lists the type, coordinates, strand and every qualifier of a feature', () => {
+        // Given a CDS from a GenBank file, with its qualifiers as notes
+        const annotation = {
+            name: 'AmpR',
+            type: 'CDS',
+            start: 3180,
+            end: 3971,
+            forward: false,
+            notes: {
+                gene: ['bla'],
+                product: ['beta-lactamase'],
+                ApEinfo_fwdcolor: ['#b7e6d7']
+            }
+        }
+
+        // When its tooltip is built
+        const lines = annotationTooltipText(annotation).split('<br>')
+
+        // Then every piece of information has its own line, apart from the
+        // ApE colour
+        assert.deepEqual(lines, [
+            '<b>AmpR</b>',
+            'Coordinates: 3181..3971',
+            'Strand: minus (-)',
+            'type: CDS',
+            'gene: bla',
+            'product: beta-lactamase'
+        ])
+    })
+
+    it('leaves out the display hints ApE saves with a feature', () => {
+        // Given a feature with ApE's colour and arrow qualifiers
+        const annotation = {
+            name: 'ColE1', start: 0, end: 583, forward: false,
+            notes: {
+                ApEinfo_revcolor: ['#7f7f7f'],
+                ApEinfo_fwdcolor: ['#7f7f7f'],
+                ApEinfo_graphicformat: ['arrow_data {{0 1 2 0 0 -1} {} 0}width 5 offset 0']
+            }
+        }
+
+        // When its tooltip is built
+        const text = annotationTooltipText(annotation)
+
+        // Then none of them is listed; they set the box colour instead
+        assert.ok(!text.includes('ApEinfo'))
+    })
+
+    it('leaves out information the file does not give', () => {
+        // Given a feature with no ID, no type and no qualifiers
+        const annotation = { name: 'ColE1', start: 0, end: 583, forward: true }
+
+        // When its tooltip is built
+        const text = annotationTooltipText(annotation)
+
+        // Then there is no placeholder for the missing ID, type or notes
+        assert.equal(text, '<b>ColE1</b><br>Coordinates: 1..583<br>Strand: plus (+)')
+    })
+
+    it('shows the ID of a feature that has one', () => {
+        // Given a feature with an ID
+        const annotation = { name: 'gene_1', id: 'gene_1_id', start: 0, end: 10, forward: true }
+
+        // When its tooltip is built
+        const lines = annotationTooltipText(annotation).split('<br>')
+
+        // Then the ID is listed
+        assert.ok(lines.includes('id: gene_1_id'))
+    })
+
+    it('shows the bases of a primer', () => {
+        // Given a primer whose sequence the parser read from its note
+        const annotation = {
+            name: 'SB_PR177', type: 'primer_bind', start: 413, end: 435,
+            forward: true, bases: 'tcgggtttcgccacctctgact'
+        }
+
+        // When its tooltip is built
+        const lines = annotationTooltipText(annotation).split('<br>')
+
+        // Then the primer sequence is listed
+        assert.ok(lines.includes('bases: tcgggtttcgccacctctgact'))
+    })
+
+    it('lists any other field the parser gives, under its own name', () => {
+        // Given a feature from a GFF file, with a field the GenBank parser
+        // never sets
+        const annotation = {
+            name: 'gene_1', start: 0, end: 10, forward: true,
+            source: 'RefSeq', score: 0.5
+        }
+
+        // When its tooltip is built
+        const lines = annotationTooltipText(annotation).split('<br>')
+
+        // Then the extra fields are listed as they are
+        assert.ok(lines.includes('source: RefSeq'))
+        assert.ok(lines.includes('score: 0.5'))
+    })
+
+    it('leaves out the row the track stacked the feature on', () => {
+        // Given a feature the track has placed in its second row
+        const annotation = { name: 'gene_1', start: 0, end: 10, forward: true, yOffset: 1 }
+
+        // When its tooltip is built
+        const text = annotationTooltipText(annotation)
+
+        // Then the row, which comes from the plot and not the file, is not shown
+        assert.ok(!text.includes('yOffset'))
+    })
+
+    it('lists each value of a qualifier that is given more than once', () => {
+        // Given a feature with two notes
+        const annotation = {
+            name: 'ori', start: 0, end: 10, forward: true,
+            notes: { note: ['high-copy-number', 'from pUC'] }
+        }
+
+        // When its tooltip is built
+        const lines = annotationTooltipText(annotation).split('<br>')
+
+        // Then both notes are listed
+        assert.ok(lines.includes('note: high-copy-number'))
+        assert.ok(lines.includes('note: from pUC'))
+    })
+
+    it('wraps long values so the tooltip stays narrow', () => {
+        // Given a CDS with a 120-residue translation
+        const translation = 'M'.repeat(120)
+        const annotation = {
+            name: 'cds', start: 0, end: 363, forward: true,
+            notes: { translation: [translation] }
+        }
+
+        // When its tooltip is built
+        const lines = annotationTooltipText(annotation).split('<br>')
+
+        // Then the translation is split over lines of at most 60 characters,
+        // and none of it is lost
+        const translationLines = lines.slice(lines.indexOf('translation:') + 1)
+        assert.ok(translationLines.every(line => line.length <= 60))
+        assert.equal(translationLines.join(''), translation)
+    })
+
+    it('shows markup characters in values as text', () => {
+        // Given a note containing angle brackets and an ampersand
+        const annotation = {
+            name: 'tag', start: 0, end: 10, forward: true,
+            notes: { note: ['<b>not bold</b> & co'] }
+        }
+
+        // When its tooltip is built
+        const text = annotationTooltipText(annotation)
+
+        // Then they are escaped rather than read as markup
+        assert.ok(text.includes('note: &lt;b&gt;not bold&lt;/b&gt; &amp; co'))
     })
 })
 
