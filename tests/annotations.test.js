@@ -9,9 +9,11 @@ import {
     arrowHeadsNeedRedraw,
     buildAnnotationLabel,
     BASE_FIGURE_HEIGHT_PX,
+    buildAnnotationArrowPaths,
     buildAxisDomains,
     buildBasecallRefPositions,
     fitLabelText,
+    parseApeArrowEnds,
     renderAlignment,
     translateAnnotationRangeToMainAxis,
     translateMainAxisRangeToAnnotation
@@ -249,6 +251,25 @@ describe('buildAnnotationLabel', () => {
 
         // Then it has no text
         assert.equal(label.text, '')
+    })
+
+    it('keeps the label clear of long ends from the ApE format', () => {
+        // Given a 13-base feature, 130px wide, with a 30px head and a 10px
+        // block at its 5' end
+        const annotation = {
+            name: 'ABCDEFGHIJKLMN', start: 100, end: 113, yOffset: 0,
+            notes: {
+                ApEinfo_graphicformat:
+                    ['arrow_data {{0 1 6 0 0 -1} {0 1 2 1 2 -1 0 -1} 0}']
+            }
+        }
+
+        // When its label is built
+        const label = buildAnnotationLabel(annotation, [50, 250], basesPerPixel)
+
+        // Then it fits the 82px between the ends and their padding:
+        // 11 characters of 7px, the last an ellipsis
+        assert.equal(label.text, 'ABCDEFGHIJ…')
     })
 
     it('hides the label of a feature too narrow to hold any of it', () => {
@@ -621,5 +642,226 @@ describe('annotation track rows', () => {
             .filter(annotation => annotation.name === 'annotation-label')
             .map(annotation => annotation.y)
         assert.deepEqual(labelRows, [-0, -0])
+    })
+})
+
+describe('parseApeArrowEnds', () => {
+    it('reads the 3\' and 5\' end shapes from ApE\'s default arrow', () => {
+        // Given the graphic format ApE saves with a feature by default
+        const graphicFormat =
+            'arrow_data {{0 1 2 0 0 -1} {} 0} width 5 offset 0'
+
+        // When the arrow ends are read
+        const arrowEnds = parseApeArrowEnds(graphicFormat)
+
+        // Then the 3' end is a triangle and the 5' end is flat
+        assert.deepEqual(arrowEnds, {
+            threePrimeEnd: [[0, 1], [2, 0], [0, -1]],
+            fivePrimeEnd: []
+        })
+    })
+
+    it('reads end shapes wrapped over several lines', () => {
+        // Given a barbed head and a capped tail, wrapped as in a GenBank file
+        const graphicFormat = 'arrow_data {{0 0.5 0 1 2 0 0 -1 0\n -0.5} ' +
+            '{0 .5 .1 .5 .1 -.5 0 -.5} 0} width 5 offset 0'
+
+        // When the arrow ends are read
+        const arrowEnds = parseApeArrowEnds(graphicFormat)
+
+        // Then both ends are read in full
+        assert.deepEqual(arrowEnds, {
+            threePrimeEnd: [[0, 0.5], [0, 1], [2, 0], [0, -1], [0, -0.5]],
+            fivePrimeEnd: [[0, 0.5], [0.1, 0.5], [0.1, -0.5], [0, -0.5]]
+        })
+    })
+
+    it('reads a negative number the parser joined to the one before it', () => {
+        // Given a barbed head wrapped before its last number; the GenBank
+        // parser joins the lines without the space between them
+        const graphicFormat =
+            'arrow_data {{0 0.5 0 1 2 0 0 -1 0-0.5} {} 0} width 5 offset 0'
+
+        // When the arrow ends are read
+        const arrowEnds = parseApeArrowEnds(graphicFormat)
+
+        // Then the joined numbers are read as two
+        assert.deepEqual(arrowEnds.threePrimeEnd,
+            [[0, 0.5], [0, 1], [2, 0], [0, -1], [0, -0.5]])
+    })
+
+    it('reads nothing from an end that is not joined to the bar', () => {
+        // Given an end the parser corrupted by joining two wrapped positive
+        // numbers twice, "2\n 0" into "20" and "0\n 1" into "01"
+        const graphicFormat =
+            'arrow_data {{0 1 20 0 -1 01} {} 0} width 5 offset 0'
+
+        // When the arrow ends are read
+        const arrowEnds = parseApeArrowEnds(graphicFormat)
+
+        // Then there is nothing to use, as its last point is off the bar
+        assert.equal(arrowEnds, null)
+    })
+
+    it('reads nothing from an end with no height', () => {
+        // Given an end whose only point lies on the centre line
+        const graphicFormat = 'arrow_data {{2 0} {} 0} width 5 offset 0'
+
+        // When the arrow ends are read
+        const arrowEnds = parseApeArrowEnds(graphicFormat)
+
+        // Then there is nothing to use
+        assert.equal(arrowEnds, null)
+    })
+
+    it('reads nothing from an end that reaches back over the bar', () => {
+        // Given an end with a point behind the bar's end
+        const graphicFormat =
+            'arrow_data {{0 1 -10 0.5 2 0 0 -1} {} 0} width 5 offset 0'
+
+        // When the arrow ends are read
+        const arrowEnds = parseApeArrowEnds(graphicFormat)
+
+        // Then there is nothing to use
+        assert.equal(arrowEnds, null)
+    })
+
+    it('reads nothing from a format it does not recognise', () => {
+        // Given a graphic format that is not arrow data
+        const graphicFormat = 'something else {{0 1 2}} width 5'
+
+        // When the arrow ends are read
+        const arrowEnds = parseApeArrowEnds(graphicFormat)
+
+        // Then there is nothing to use
+        assert.equal(arrowEnds, null)
+    })
+})
+
+describe('arrow shapes', () => {
+    // At one base per pixel ApE's default head, 2 units long, is 10 bases.
+    const basesPerPixel = 1
+    const pathPoints = path => [...path.matchAll(/(-?[\d.]+),(-?[\d.]+)/g)]
+        .map(([, x, y]) => [Number(x), Number(y)])
+
+    it('draws a plain arrow head when the file has no ApE format', () => {
+        // Given a plus-strand feature from 0 to 100 without ApE qualifiers
+        const feature = { start: 0, end: 100, forward: true, yOffset: 0 }
+
+        // When its arrow is drawn
+        const [path] = buildAnnotationArrowPaths(
+            { features: [feature] }, basesPerPixel)
+
+        // Then a 10-base head ends in a tip at the end of the feature
+        assert.deepEqual(pathPoints(path),
+            [[90, 0.4], [100, 0], [90, -0.4], [0, -0.4], [0, 0.4]])
+    })
+
+    it('points the head of a minus-strand feature at its start', () => {
+        // Given a minus-strand feature from 0 to 100
+        const feature = { start: 0, end: 100, forward: false, yOffset: 0 }
+
+        // When its arrow is drawn
+        const [path] = buildAnnotationArrowPaths(
+            { features: [feature] }, basesPerPixel)
+
+        // Then the tip is at the start of the feature
+        assert.deepEqual(pathPoints(path),
+            [[10, -0.4], [0, 0], [10, 0.4], [100, 0.4], [100, -0.4]])
+    })
+
+    it('turns an uneven head upside down on the minus strand', () => {
+        // Given a minus-strand feature with a head that has a barb on top
+        // only
+        const feature = {
+            start: 0, end: 100, forward: false, yOffset: 0,
+            notes: {
+                ApEinfo_graphicformat:
+                    ['arrow_data {{0 1 2 0 0 -0.5} {} 0} width 5 offset 0']
+            }
+        }
+
+        // When its arrow is drawn
+        const [path] = buildAnnotationArrowPaths(
+            { features: [feature] }, basesPerPixel)
+
+        // Then the arrow is turned round as a whole, so the barb is below
+        assert.deepEqual(pathPoints(path),
+            [[10, -0.4], [0, 0], [10, 0.2], [100, 0.2], [100, -0.4]])
+    })
+
+    it('draws a plain box for a feature ApE draws with two flat ends', () => {
+        // Given a feature whose ApE format has no shape at either end
+        const feature = {
+            start: 0, end: 100, forward: true, yOffset: 0,
+            notes: {
+                ApEinfo_graphicformat:
+                    ['arrow_data {{} {} 0} width 5 offset 0']
+            }
+        }
+
+        // When its arrow is drawn
+        const [path] = buildAnnotationArrowPaths(
+            { features: [feature] }, basesPerPixel)
+
+        // Then it is a rectangle over the whole feature
+        assert.deepEqual(pathPoints(path),
+            [[100, 0.4], [100, -0.4], [0, -0.4], [0, 0.4]])
+    })
+
+    it('draws a barbed head on a narrower bar, as ApE does', () => {
+        // Given a feature with ApE's barbed arrow, whose head joins the bar
+        // at half the head's height
+        const feature = {
+            start: 0, end: 100, forward: true, yOffset: 0,
+            notes: {
+                ApEinfo_graphicformat:
+                    ['arrow_data {{0 0.5 0 1 2 0 0 -1 0 -0.5} {} 0} width 5 offset 0']
+            }
+        }
+
+        // When its arrow is drawn
+        const [path] = buildAnnotationArrowPaths(
+            { features: [feature] }, basesPerPixel)
+
+        // Then the head is full height and the bar half of it
+        assert.deepEqual(pathPoints(path), [
+            [90, 0.2], [90, 0.4], [100, 0], [90, -0.4], [90, -0.2],
+            [0, -0.2], [0, 0.2]
+        ])
+    })
+
+    it('draws the 5\' end shape at the start of a plus-strand feature', () => {
+        // Given a feature with a flat 3' end and a short block on its 5' end
+        const feature = {
+            start: 0, end: 100, forward: true, yOffset: 0,
+            notes: {
+                ApEinfo_graphicformat:
+                    ['arrow_data {{} {0 1 2 1 2 -1 0 -1} 0} width 5 offset 0']
+            }
+        }
+
+        // When its arrow is drawn
+        const [path] = buildAnnotationArrowPaths(
+            { features: [feature] }, basesPerPixel)
+
+        // Then the block takes the first 10 bases, with the bar after it
+        assert.deepEqual(pathPoints(path), [
+            [100, 0.4], [100, -0.4],
+            [10, -0.4], [0, -0.4], [0, 0.4], [10, 0.4]
+        ])
+    })
+
+    it('keeps the head within half of a short feature', () => {
+        // Given a 6-base feature, shorter than two default heads
+        const feature = { start: 0, end: 6, forward: true, yOffset: 0 }
+
+        // When its arrow is drawn
+        const [path] = buildAnnotationArrowPaths(
+            { features: [feature] }, basesPerPixel)
+
+        // Then the head takes 3 bases
+        assert.deepEqual(pathPoints(path),
+            [[3, 0.4], [6, 0], [3, -0.4], [0, -0.4], [0, 0.4]])
     })
 })
