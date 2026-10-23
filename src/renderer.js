@@ -1,13 +1,30 @@
 import { getYOffsetsForPotentiallyCircularRanges } from "@teselagen/range-utils";
 import { annotationTypes } from "@teselagen/sequence-utils";
 
-const buildAnnotationFigureData = (annotationData, basesPerPixel) => {
+// Gives every annotation the track row (yOffset) it is drawn on and returns
+// the last row. range-utils reads range ends as inclusive, while ends here are
+// exclusive; passed as they are, features that only touch would be stacked as
+// if they overlapped.
+const stackAnnotationRows = annotations => {
+    const inclusiveRanges = annotations.map(annotation =>
+        ({ start: annotation.start, end: annotation.end - 1 }))
+    const { yOffsets, maxYOffset } =
+        getYOffsetsForPotentiallyCircularRanges(inclusiveRanges)
+    annotations.forEach((annotation, index) => {
+        annotation.yOffset = yOffsets[index]
+    })
+    return maxYOffset
+}
+
+const buildAnnotationFigureData = (annotationData, viewRange, basesPerPixel) => {
     const yaxes = []
     const traces = []
     const shapes = []
+    const labels = []
+    const trackRowCounts = []
 
     if (!annotationData) {
-        return { traces, yaxes, shapes }
+        return { traces, yaxes, shapes, labels, trackRowCounts }
     }
 
     let yaxisIdx = 3
@@ -16,7 +33,7 @@ const buildAnnotationFigureData = (annotationData, basesPerPixel) => {
         if (!annotations) continue
 
         yaxisIdx++
-        const { maxYOffset } = getYOffsetsForPotentiallyCircularRanges(annotations)
+        const maxYOffset = stackAnnotationRows(annotations)
         const barTrace = annotationsToBarTrace(annotations)
         traces.push({
             ...barTrace,
@@ -26,6 +43,8 @@ const buildAnnotationFigureData = (annotationData, basesPerPixel) => {
         })
         shapes.push(...annotations.map(annotation =>
             annotationToArrowShape(annotation, `y${yaxisIdx}`, basesPerPixel)))
+        labels.push(...annotations.map(annotation => annotationToLabel(
+            annotation, `y${yaxisIdx}`, viewRange, basesPerPixel)))
         yaxes.push({
             title: {
                 text: annotationType
@@ -36,26 +55,10 @@ const buildAnnotationFigureData = (annotationData, basesPerPixel) => {
             range: [-maxYOffset - 0.5, 0.5],
             _index: yaxisIdx
         })
+        trackRowCounts.push(maxYOffset + 1)
     }
 
-    return { traces, yaxes, shapes }
-}
-
-const buildAxisDomains = annotationAxisCount => {
-    const mainPlotDomain = annotationAxisCount > 0 ? [0, 0.55] : [0, 1]
-    if (annotationAxisCount === 0) {
-        return { mainPlotDomain, annotationDomains: [] }
-    }
-
-    const annotationSectionStart = mainPlotDomain[1]
-    const annotationSectionHeight = 1 - annotationSectionStart
-    const annotationDomains = Array.from({ length: annotationAxisCount }, (_, index) => {
-        const start = annotationSectionStart + (index / annotationAxisCount) * annotationSectionHeight
-        const end = annotationSectionStart + ((index + 1) / annotationAxisCount) * annotationSectionHeight
-        return [start, end]
-    })
-
-    return { mainPlotDomain, annotationDomains }
+    return { traces, yaxes, shapes, labels, trackRowCounts }
 }
 
 
@@ -74,6 +77,30 @@ export const buildBasecallRefPositions = ({ refpos, refalign, gappedTrace }) => 
 
     return gappedTrace.basecallPos.map((_, basecallIndex) =>
         refPositionByColumn[basecallIndex + gappedTrace.leadingGaps])
+}
+
+// A feature that never reaches the aligned bases can never come into view, yet
+// it would still take a row in its track and push the others down. Features
+// running past either end are kept and cut off at the edge of the view.
+export const annotationsInAlignedRegion = (annotationData, data) => {
+    if (!annotationData) {
+        return null
+    }
+
+    const refPositions = buildBasecallRefPositions(data)
+    const regionStart = refPositions[0]
+    const regionEnd = refPositions.at(-1) + 1
+    const overlapsRegion = annotation =>
+        annotation.start < regionEnd && annotation.end > regionStart
+
+    const inRegion = {}
+    for (const annotationType of annotationTypes) {
+        const annotations = (annotationData[annotationType] ?? []).filter(overlapsRegion)
+        if (annotations.length > 0) {
+            inRegion[annotationType] = annotations
+        }
+    }
+    return inRegion
 }
 
 // Tick labels show only the called base(s). The basecall text from the file
@@ -168,6 +195,66 @@ export const REFERENCE_ROW_BOTTOM_PX = 34
 const MISMATCH_COLOR = 'rgba(200,0,0,.6)'
 const SECONDARY_MATCH_COLOR = 'rgba(200,150,0,.6)'
 
+// The page sizes the plot for the trace alone; annotation tracks add to that.
+export const BASE_FIGURE_HEIGHT_PX = 600
+// Plotly's default margins. Track heights are worked out from the plot
+// height, so the layout sets them rather than relying on the defaults.
+const FIGURE_MARGIN_TOP_PX = 100
+const FIGURE_MARGIN_BOTTOM_PX = 80
+// The range slider's default height in the base figure. Plotly would grow it
+// with the figure; it is kept at this height instead.
+const RANGE_SLIDER_HEIGHT_PX = 63
+// Measured with Plotly 3.4: the two-line x-axis labels plus the padding Plotly
+// puts around the range slider.
+const X_AXIS_LABELS_DEPTH_PX = 47
+const NON_PLOT_HEIGHT_PX = FIGURE_MARGIN_TOP_PX + FIGURE_MARGIN_BOTTOM_PX +
+    RANGE_SLIDER_HEIGHT_PX + X_AXIS_LABELS_DEPTH_PX
+
+// Plotly sizes the slider as a fraction of the figure height between the
+// margins.
+const rangeSliderThickness = figureHeightPx => RANGE_SLIDER_HEIGHT_PX /
+    (figureHeightPx - FIGURE_MARGIN_TOP_PX - FIGURE_MARGIN_BOTTOM_PX)
+
+const ANNOTATION_ROW_HEIGHT_PX = 22
+const ANNOTATION_TRACK_GAP_PX = 8
+// The basecall and reference letters sit between the trace and the tracks.
+const LETTER_ROWS_HEIGHT_PX = REFERENCE_ROW_BOTTOM_PX + 12
+
+// The annotation tracks go under the reference row, one per annotation type
+// stacked downwards, each with a fixed height per row of overlapping
+// features. The figure grows by their height, so the trace keeps its size.
+export const buildAxisDomains = trackRowCounts => {
+    if (trackRowCounts.length === 0) {
+        return {
+            figureHeightPx: BASE_FIGURE_HEIGHT_PX,
+            mainPlotDomain: [0, 1],
+            annotationDomains: []
+        }
+    }
+
+    const trackHeightsPx = trackRowCounts.map(rowCount =>
+        rowCount * ANNOTATION_ROW_HEIGHT_PX)
+    const totalTrackHeightPx = trackHeightsPx.reduce((sum, height) => sum + height, 0)
+    const totalGapHeightPx = (trackHeightsPx.length - 1) * ANNOTATION_TRACK_GAP_PX
+    const annotationSectionHeightPx =
+        LETTER_ROWS_HEIGHT_PX + totalTrackHeightPx + totalGapHeightPx
+
+    const figureHeightPx = BASE_FIGURE_HEIGHT_PX + annotationSectionHeightPx
+    const plotHeightPx = figureHeightPx - NON_PLOT_HEIGHT_PX
+    const toDomainFraction = heightPx => heightPx / plotHeightPx
+
+    const mainPlotDomain = [toDomainFraction(annotationSectionHeightPx), 1]
+    let trackTopPx = annotationSectionHeightPx - LETTER_ROWS_HEIGHT_PX
+    const annotationDomains = trackHeightsPx.map(trackHeightPx => {
+        const trackBottomPx = trackTopPx - trackHeightPx
+        const domain = [toDomainFraction(trackBottomPx), toDomainFraction(trackTopPx)]
+        trackTopPx = trackBottomPx - ANNOTATION_TRACK_GAP_PX
+        return domain
+    })
+
+    return { figureHeightPx, mainPlotDomain, annotationDomains }
+}
+
 // Coloured cells below the axis, running from the axis line through the
 // basecall and reference letters. They share the bar colours, so a toggled-on
 // bar and its cell read as one highlight. All cells of one colour form a single
@@ -188,7 +275,7 @@ const referenceCellsShape = (basecallXs, basecallIndexes, color) => {
         type: 'path',
         path: cellPaths.join(' '),
         xref: 'x',
-        yref: 'paper',
+        yref: 'y domain',
         ysizemode: 'pixel',
         yanchor: 0,
         fillcolor: color,
@@ -219,7 +306,7 @@ const referenceRowEndLabel = (side, text) => ({
     x: side === 'start' ? 0 : 1,
     xanchor: side === 'start' ? 'right' : 'left',
     xshift: side === 'start' ? -6 : 6,
-    yref: 'paper',
+    yref: 'y domain',
     y: 0,
     yshift: -(REFERENCE_ROW_TOP_PX + REFERENCE_ROW_BOTTOM_PX) / 2,
     yanchor: 'middle',
@@ -366,11 +453,36 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
     const {
         traces: annotationTraces,
         yaxes: annotationYAxes,
-        shapes: annotationShapes
-    } = buildAnnotationFigureData(annotationData, initialBasesPerPixel)
+        shapes: annotationShapes,
+        labels: annotationLabels,
+        trackRowCounts
+    } = buildAnnotationFigureData(
+        annotationData, initialAnnotationRange, initialBasesPerPixel)
     data.push(...annotationTraces)
 
-    const { mainPlotDomain, annotationDomains } = buildAxisDomains(annotationYAxes.length)
+    const { figureHeightPx, mainPlotDomain, annotationDomains } =
+        buildAxisDomains(trackRowCounts)
+
+    // Plotly puts the range slider under the lowest subplot that shares the
+    // main x-axis, which would be the trace, on top of the annotation tracks.
+    // An empty sliver of a subplot at the bottom of the figure moves it below
+    // them.
+    const sliderSpacerAxisIndex = 4 + annotationYAxes.length
+    const sliderSpacerSubplots = annotationYAxes.length > 0
+        ? [[`xy${sliderSpacerAxisIndex}`]]
+        : []
+    // A subplot exists only while a trace is on it.
+    if (sliderSpacerSubplots.length > 0) {
+        data.push({
+            x: [],
+            y: [],
+            type: 'scatter',
+            xaxis: 'x',
+            yaxis: `y${sliderSpacerAxisIndex}`,
+            hoverinfo: 'skip',
+            showlegend: false
+        })
+    }
 
     const updatemenus = [{
         type: 'buttons',
@@ -393,6 +505,8 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
 
     const layout = {
         title: (raw_data.refchr ?? 'Unnamed') + (raw_data.forward ? ' - forward' : ' - reverse'),
+        height: figureHeightPx,
+        margin: { t: FIGURE_MARGIN_TOP_PX, b: FIGURE_MARGIN_BOTTOM_PX },
         yaxis: {
             type: 'linear',
             domain: mainPlotDomain,
@@ -430,10 +544,14 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
             tickvals: raw_data.gappedTrace.basecallPos.map(pos => pos - 1),
             ticktext: buildBasecallTickText(raw_data),
             rangeslider: {
-                visible: true
+                visible: true,
+                thickness: rangeSliderThickness(figureHeightPx)
             },
             minallowed: 0,
-            tickangle: 0
+            tickangle: 0,
+            // The grid would otherwise anchor it to the bottom row, the
+            // range-slider spacer.
+            anchor: 'y'
         },
         xaxis2: {
             visible: false,
@@ -454,7 +572,8 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
         // Order must match the REFERENCE_ROW_*_LABEL_INDEX constants.
         annotations: [
             referenceRowEndLabel('start', initialReferenceLabels.start),
-            referenceRowEndLabel('end', initialReferenceLabels.end)
+            referenceRowEndLabel('end', initialReferenceLabels.end),
+            ...annotationLabels
         ],
         ...Object.fromEntries(annotationYAxes.map((axis, index) => [
             `yaxis${axis._index}`,
@@ -465,17 +584,25 @@ export const renderAlignment = (figure, raw_data, Plotly, annotationData = null)
                 fixedrange: true,
             }
         ])),
+        ...(sliderSpacerSubplots.length > 0 && {
+            [`yaxis${sliderSpacerAxisIndex}`]: {
+                domain: [0, 0.001],
+                visible: false,
+                fixedrange: true
+            }
+        }),
         updatemenus,
         // The default 'x' mode matches on x only, so annotations stacked in
         // other rows at the same x never get a tooltip.
         hovermode: 'closest',
         grid: {
-            rows: annotationYAxes.length + 1,
+            rows: 1 + annotationYAxes.length + sliderSpacerSubplots.length,
             columns: 1,
             // Every annotation subplot must be declared or it gets no hover.
             subplots: [
+                ['xy'],
                 ...annotationYAxes.map(axis => [`x3y${axis._index}`]),
-                ['xy']
+                ...sliderSpacerSubplots
             ],
         }
     };
@@ -547,9 +674,90 @@ export const buildAnnotationArrowPaths = (annotationData, basesPerPixel) => {
     if (!annotationData) {
         return []
     }
-    return annotationTypes
-        .flatMap(annotationType => annotationData[annotationType] ?? [])
+    return annotationList(annotationData)
         .map(annotation => arrowPath(annotation, basesPerPixel))
+}
+
+// Labels use a monospace font, so their width can be worked out from the
+// character count without measuring rendered text.
+const LABEL_FONT_SIZE = 11
+const LABEL_CHARACTER_WIDTH_PX = 7
+const LABEL_PADDING_PX = 4
+const ELLIPSIS = '…'
+// A label cut to fewer characters than this says too little to be worth
+// showing; the hover still has the full text.
+const MIN_TRUNCATED_LABEL_CHARACTERS = 3
+export const ANNOTATION_LABEL_NAME = 'annotation-label'
+
+const annotationName = annotation => annotation.name ?? annotation.type ?? 'unnamed'
+
+// Name and ID, as in the draft layout. GenBank has no ID qualifier, so those
+// features show their name alone.
+export const annotationLabelText = annotation => {
+    const name = annotationName(annotation)
+    return annotation.id ? `${name} (${annotation.id})` : name
+}
+
+export const fitLabelText = (text, widthPx) => {
+    if (!(widthPx > 0)) {
+        return ''
+    }
+
+    const characterCount = Math.floor(widthPx / LABEL_CHARACTER_WIDTH_PX)
+    if (text.length <= characterCount) {
+        return text
+    }
+
+    const keptCharacterCount = characterCount - ELLIPSIS.length
+    if (keptCharacterCount < MIN_TRUNCATED_LABEL_CHARACTERS) {
+        return ''
+    }
+    return text.slice(0, keptCharacterCount) + ELLIPSIS
+}
+
+// Most features are far longer than the bases in view, so the label is centred
+// on the part of the box in view rather than on the whole box. Its width
+// leaves out the arrow head, which narrows to a point.
+//
+// A label is hidden by leaving it without text, never with visible: false.
+// Plotly fills in no defaults, such as the font, for a hidden annotation, and
+// main.js later shows labels without the full redraw that would fill them in.
+export const buildAnnotationLabel = (annotation, [viewStart, viewEnd], basesPerPixel) => {
+    const visibleStart = Math.max(annotation.start, viewStart)
+    const visibleEnd = Math.min(annotation.end, viewEnd)
+    const visibleWidthPx = (visibleEnd - visibleStart) / basesPerPixel
+    const textWidthPx =
+        visibleWidthPx - ARROW_HEAD_LENGTH_PX - 2 * LABEL_PADDING_PX
+
+    return {
+        x: (visibleStart + visibleEnd) / 2,
+        text: fitLabelText(annotationLabelText(annotation), textWidthPx)
+    }
+}
+
+const annotationList = annotationData =>
+    annotationTypes.flatMap(annotationType => annotationData[annotationType] ?? [])
+
+// Labels for a new view, in the same order as the label annotations
+// buildAnnotationFigureData puts in the layout.
+export const buildAnnotationLabels = (annotationData, viewRange, basesPerPixel) => {
+    if (!annotationData) {
+        return []
+    }
+    return annotationList(annotationData).map(annotation =>
+        buildAnnotationLabel(annotation, viewRange, basesPerPixel))
+}
+
+const annotationToLabel = (annotation, yref, viewRange, basesPerPixel) => {
+    return {
+        ...buildAnnotationLabel(annotation, viewRange, basesPerPixel),
+        name: ANNOTATION_LABEL_NAME,
+        xref: 'x3',
+        yref,
+        y: -annotation.yOffset,
+        showarrow: false,
+        font: { family: 'monospace', size: LABEL_FONT_SIZE, color: '#000' }
+    }
 }
 
 const annotationsToBarTrace = (annotations) => {
@@ -565,7 +773,7 @@ const annotationsToBarTrace = (annotations) => {
         base.push(annotation.start)
         color.push(annotationColor(annotation))
         customdata.push([
-            annotation.name ?? annotation.type ?? 'unnamed',
+            annotationName(annotation),
             annotation.id ?? 'n/a',
             // GenBank coordinates: 1-based, inclusive
             annotation.start + 1,
