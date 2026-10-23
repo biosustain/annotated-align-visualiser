@@ -622,19 +622,147 @@ const annotationColor = annotation => {
     return colors?.[0] ?? DEFAULT_ANNOTATION_COLOR
 }
 
-// A box whose tip points right on the plus strand and left on the minus strand.
-// The head is a fixed number of pixels, so its length in bases depends on the
-// zoom; it never takes more than half the feature.
+// ApE saves how it draws the two ends of a feature as
+// /ApEinfo_graphicformat="arrow_data {{<3' end>} {<5' end>} 0} width 5 offset 0".
+// Each end is a list of x y points, running from the top edge of the bar out
+// to the end of the feature (x away from the bar) and back to its bottom
+// edge; an empty list is a flat end. width and offset place the feature on
+// ApE's circular map, which the stacked tracks have no use for.
+const NUMBER_PATTERN = /-?(\d+\.?\d*|\.\d+)/g
+const ARROW_DATA_PATTERN = /arrow_data\s*\{\s*\{([^{}]*)\}\s*\{([^{}]*)\}/
+
+// The GenBank parser joins a wrapped value without the space at the break,
+// so "0\n -0.5" arrives as "0-0.5". Reading numbers rather than splitting on
+// spaces separates those again.
+const parseArrowEndPoints = list => {
+    const numbers = (list.match(NUMBER_PATTERN) ?? []).map(Number)
+    const unreadText = list.replace(NUMBER_PATTERN, '').trim()
+    if (numbers.length % 2 !== 0 || unreadText !== '') {
+        return null
+    }
+
+    const points = []
+    for (let index = 0; index < numbers.length; index += 2) {
+        points.push([numbers[index], numbers[index + 1]])
+    }
+    return points
+}
+
+// Every end ApE writes starts and ends on the bar, at x 0, with its top above
+// its bottom, and stays on the outer side of it. Positive numbers the parser
+// joined ("2\n 0" into "20") leave an end that does not, so it is not used.
+const isUsableArrowEnd = points => {
+    if (points.length === 0) {
+        return true
+    }
+    const [firstX, firstY] = points[0]
+    const [lastX, lastY] = points.at(-1)
+    const staysOutsideBar = points.every(([x]) => x >= 0)
+    return points.length >= 2 && firstX === 0 && lastX === 0 &&
+        firstY > lastY && staysOutsideBar
+}
+
+export const parseApeArrowEnds = graphicFormat => {
+    const match = ARROW_DATA_PATTERN.exec(graphicFormat)
+    if (!match) {
+        return null
+    }
+
+    const threePrimeEnd = parseArrowEndPoints(match[1])
+    const fivePrimeEnd = parseArrowEndPoints(match[2])
+    if (!threePrimeEnd || !fivePrimeEnd) {
+        return null
+    }
+    if (!isUsableArrowEnd(threePrimeEnd) || !isUsableArrowEnd(fivePrimeEnd)) {
+        return null
+    }
+    return { threePrimeEnd, fivePrimeEnd }
+}
+
+// ApE's default: a plain head as tall as the bar and 2 units long.
+const DEFAULT_ARROW_ENDS = {
+    threePrimeEnd: [[0, 1], [2, 0], [0, -1]],
+    fivePrimeEnd: []
+}
+// The default head is ARROW_HEAD_LENGTH_PX long, which sets the size of a
+// unit.
+const ARROW_UNIT_PX = ARROW_HEAD_LENGTH_PX / 2
+
+const arrowEndsOf = annotation => {
+    const graphicFormat = annotation.notes?.ApEinfo_graphicformat?.[0]
+    const arrowEnds = graphicFormat && parseApeArrowEnds(graphicFormat)
+    return arrowEnds ?? DEFAULT_ARROW_ENDS
+}
+
+const endLengthUnits = endPoints => Math.max(0, ...endPoints.map(([x]) => x))
+
+// Pixels the two ends take up at full size, which the label keeps clear of.
+const arrowEndsLengthPx = annotation => {
+    const { threePrimeEnd, fivePrimeEnd } = arrowEndsOf(annotation)
+    const lengthUnits =
+        endLengthUnits(threePrimeEnd) + endLengthUnits(fivePrimeEnd)
+    return lengthUnits * ARROW_UNIT_PX
+}
+
+// The feature drawn in the shape ApE gives its ends, pointing right on the
+// plus strand; on the minus strand the whole shape is turned round. The
+// tallest point of either end fills the box, and the first and last points of
+// the shaped end set the height of the bar. Ends are a fixed number of pixels
+// long, so their length in bases depends on the zoom; they never take more
+// than half the feature.
 const arrowPath = (annotation, basesPerPixel) => {
     const { start, end } = annotation
+    const featureLength = end - start
     const centerY = -annotation.yOffset
-    const top = centerY + ARROW_HALF_HEIGHT
-    const bottom = centerY - ARROW_HALF_HEIGHT
-    const headLength = Math.min(ARROW_HEAD_LENGTH_PX * basesPerPixel, (end - start) / 2)
+    const { threePrimeEnd, fivePrimeEnd } = arrowEndsOf(annotation)
 
-    return annotation.forward
-        ? `M ${start},${bottom} L ${end - headLength},${bottom} L ${end},${centerY} L ${end - headLength},${top} L ${start},${top} Z`
-        : `M ${end},${bottom} L ${start + headLength},${bottom} L ${start},${centerY} L ${start + headLength},${top} L ${end},${top} Z`
+    const allEndPoints = [...threePrimeEnd, ...fivePrimeEnd]
+    const tallestPoint =
+        Math.max(0, ...allEndPoints.map(([, y]) => Math.abs(y)))
+    const heightScale = ARROW_HALF_HEIGHT / (tallestPoint || 1)
+
+    const threePrimeLengthUnits = endLengthUnits(threePrimeEnd)
+    const fivePrimeLengthUnits = endLengthUnits(fivePrimeEnd)
+    const unitBases = ARROW_UNIT_PX * basesPerPixel
+    const longestEndBases =
+        unitBases * Math.max(threePrimeLengthUnits, fivePrimeLengthUnits)
+    const shortening = longestEndBases > featureLength / 2
+        ? (featureLength / 2) / longestEndBases
+        : 1
+    const lengthScale = unitBases * shortening
+    const threePrimeEndBases = threePrimeLengthUnits * lengthScale
+    const fivePrimeEndBases = fivePrimeLengthUnits * lengthScale
+
+    // A flat end follows the bar, whose edges are set by the shaped end.
+    const shapedEnd = threePrimeEnd.length > 0 ? threePrimeEnd : fivePrimeEnd
+    const [barTop, barBottom] = shapedEnd.length > 0
+        ? [shapedEnd[0][1] * heightScale, shapedEnd.at(-1)[1] * heightScale]
+        : [ARROW_HALF_HEIGHT, -ARROW_HALF_HEIGHT]
+
+    // Points along the feature, from 0 at its 5' end to featureLength at its
+    // 3' end, and across it from the centre line.
+    const threePrimeOutline = threePrimeEnd.length > 0
+        ? threePrimeEnd.map(([x, y]) => [
+            featureLength - threePrimeEndBases + x * lengthScale,
+            y * heightScale
+        ])
+        : [[featureLength, barTop], [featureLength, barBottom]]
+    const fivePrimeOutline = fivePrimeEnd.length > 0
+        ? fivePrimeEnd.map(([x, y]) =>
+            [fivePrimeEndBases - x * lengthScale, y * heightScale])
+        : [[0, barTop], [0, barBottom]]
+    // Down the 3' end, back along the bottom and up the 5' end; closing the
+    // path draws the top edge.
+    const outline = [...threePrimeOutline, ...fivePrimeOutline.reverse()]
+
+    const toPlotPoint = ([along, across]) => {
+        const x = annotation.forward ? start + along : end - along
+        const y = annotation.forward ? centerY + across : centerY - across
+        return `${x},${y}`
+    }
+    const [firstPoint, ...otherPoints] = outline.map(toPlotPoint)
+    const lines = otherPoints.map(point => `L ${point}`).join(' ')
+    return `M ${firstPoint} ${lines} Z`
 }
 
 const annotationToArrowShape = (annotation, yref, basesPerPixel) => {
@@ -717,7 +845,7 @@ export const fitLabelText = (text, widthPx) => {
 
 // Most features are far longer than the bases in view, so the label is centred
 // on the part of the box in view rather than on the whole box. Its width
-// leaves out the arrow head, which narrows to a point.
+// leaves out the shaped ends, such as the arrow head, which narrow the box.
 //
 // A label is hidden by leaving it without text, never with visible: false.
 // Plotly fills in no defaults, such as the font, for a hidden annotation, and
@@ -726,8 +854,8 @@ export const buildAnnotationLabel = (annotation, [viewStart, viewEnd], basesPerP
     const visibleStart = Math.max(annotation.start, viewStart)
     const visibleEnd = Math.min(annotation.end, viewEnd)
     const visibleWidthPx = (visibleEnd - visibleStart) / basesPerPixel
-    const textWidthPx =
-        visibleWidthPx - ARROW_HEAD_LENGTH_PX - 2 * LABEL_PADDING_PX
+    const textWidthPx = visibleWidthPx - arrowEndsLengthPx(annotation) -
+        2 * LABEL_PADDING_PX
 
     return {
         x: (visibleStart + visibleEnd) / 2,
