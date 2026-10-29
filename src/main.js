@@ -15,7 +15,13 @@ import {
     translateAnnotationRangeToMainAxis,
     translateMainAxisRangeToAnnotation
 } from './renderer'
-import { parseAnnotationFile, formatJsonForDisplay } from './parsers'
+import {
+    parseAnnotationFile,
+    findReferenceMismatch,
+    formatJsonForDisplay,
+    refposOnReverseComplement,
+    reverseComplementAnnotations
+} from './parsers'
 import "https://cdn.plot.ly/plotly-3.4.0.min.js"
 
 const plotly = window.Plotly
@@ -33,6 +39,9 @@ const EXAMPLE_ANNOTATION_FILE_NAME = 'puc19_spec_2xu6grna.gb'
 const state = {
     loading: false,
     currentData: null,
+    // currentData with refpos moved onto the strand the annotations are drawn
+    // on, which differs from it for a reverse alignment.
+    alignedData: null,
     annotationData: null,
     // The example's annotations describe the example reference only, so they
     // are dropped when a trace of another reference is uploaded.
@@ -57,6 +66,7 @@ const elements = {
     annotationTitle: document.getElementById('annotation-title'),
     annotationToggle: document.getElementById('annotation-toggle'),
     annotationJson: document.getElementById('annotation-json'),
+    annotationWarning: document.getElementById('annotation-warning'),
     annotationFileName: document.getElementById('annotation-file-name'),
     annotationJsonContent: document.getElementById('annotation-json-content'),
     currentInfo: document.getElementById('current-info'),
@@ -216,7 +226,7 @@ const setReferenceRowLabel = (annotationIndex, text) => {
 }
 
 const updateReferenceRowLabels = xRange => {
-    const { start, end } = referenceRangeLabels(state.currentData, xRange)
+    const { start, end } = referenceRangeLabels(state.alignedData, xRange)
     setReferenceRowLabel(REFERENCE_ROW_START_LABEL_INDEX, `${start}`)
     setReferenceRowLabel(REFERENCE_ROW_END_LABEL_INDEX, `${end}`)
 }
@@ -460,7 +470,7 @@ const attachFigureInteractions = () => {
         // The feature is in reference positions; the main x-axis is in trace
         // samples.
         const mainAxisRange =
-            translateAnnotationRangeToMainAxis(state.currentData, annotationRange)
+            translateAnnotationRangeToMainAxis(state.alignedData, annotationRange)
         plotly.relayout(figure, {
             'xaxis.range': mainAxisRange
         })
@@ -489,7 +499,7 @@ const attachFigureInteractions = () => {
             disableNextAxisSync = true
             // Scale annotation x-axis to match the new x-axis range
             const annotationRange =
-                translateMainAxisRangeToAnnotation(state.currentData, xRange)
+                translateMainAxisRangeToAnnotation(state.alignedData, xRange)
             writeAnnotationLabels(annotationRange)
             return plotly.relayout(figure, {
                 'xaxis3.range': annotationRange,
@@ -506,7 +516,7 @@ const attachFigureInteractions = () => {
             // Scale x-axis to fit the annotation x-axis range
             return plotly.relayout(figure, {
                 'xaxis.range':
-                    translateAnnotationRangeToMainAxis(state.currentData, x3Range)
+                    translateAnnotationRangeToMainAxis(state.alignedData, x3Range)
             })
         }
     })
@@ -550,15 +560,36 @@ const updateAnnotationView = () => {
     elements.annotationJsonContent.textContent = formatJsonForDisplay(state.annotationData.parsedSequence, 2)
 }
 
+const updateReferenceMismatchWarning = data => {
+    const warning = findReferenceMismatch(data, state.annotationData?.parsedSequence)
+    elements.annotationWarning.textContent = warning ?? ''
+    elements.annotationWarning.classList.toggle('hidden', !warning)
+}
+
+// A reverse alignment is against the reverse complement of the reference, so
+// the annotations and refpos are moved onto that strand to line up with it.
+const orientToAlignedStrand = (parsedSequence, data) => {
+    if (!parsedSequence || data.forward) {
+        return { annotations: parsedSequence, alignment: data }
+    }
+
+    const annotations = reverseComplementAnnotations(parsedSequence)
+    const refpos = refposOnReverseComplement(data, parsedSequence.size)
+    return { annotations, alignment: { ...data, refpos } }
+}
+
 const renderData = (data) => {
     state.currentData = data
     state.tickSets = buildTickSets(data)
     state.activeTickDensity = 'all'
     // The new figure's arrows are drawn with an estimated plot width.
     state.arrowBasesPerPixel = null
-    state.trackAnnotations = annotationsInAlignedRegion(
+    const { annotations, alignment } = orientToAlignedStrand(
         state.annotationData?.parsedSequence, data)
-    renderAlignment(figure, data, plotly, state.trackAnnotations)
+    state.trackAnnotations = annotationsInAlignedRegion(annotations, alignment)
+    state.alignedData = alignment
+    updateReferenceMismatchWarning(data)
+    renderAlignment(figure, alignment, plotly, state.trackAnnotations)
     attachFigureInteractions()
     syncAuxYAxisVisibility()
     updateCurrentInfo()
