@@ -1,7 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { makeAnnotationEndsExclusive } from '../src/parsers.js'
+import {
+    findReferenceMismatch,
+    makeAnnotationEndsExclusive,
+    refposOnReverseComplement,
+    reverseComplementAnnotations
+} from '../src/parsers.js'
 import {
     annotationLabelText,
     annotationsInAlignedRegion,
@@ -32,6 +37,101 @@ describe('makeAnnotationEndsExclusive', () => {
         // Then start is unchanged and end is one past the last base
         assert.equal(normalized.features[0].start, 2)
         assert.equal(normalized.features[0].end, 10)
+    })
+})
+
+describe('reverseComplementAnnotations', () => {
+    it('mirrors the range within the sequence and swaps the strand', () => {
+        // Given a 20 bp sequence with a plus strand feature at 2..7 (exclusive end)
+        const parsedSequence = {
+            size: 20,
+            features: [{ name: 'fwd', start: 2, end: 7, forward: true, strand: 1, bases: 'AACGT' }]
+        }
+
+        // When the annotations are reverse complemented
+        const reversed = reverseComplementAnnotations(parsedSequence)
+
+        // Then the feature covers 13..18 on the minus strand
+        const [feature] = reversed.features
+        assert.equal(feature.start, 13)
+        assert.equal(feature.end, 18)
+        assert.equal(feature.forward, false)
+        assert.equal(feature.strand, -1)
+        assert.equal(feature.bases, 'ACGTT')
+    })
+})
+
+describe('findReferenceMismatch', () => {
+    const parsedSequence = { sequence: 'aaCCGTTtt' }
+
+    it('accepts a forward alignment found at refpos, ignoring case and gaps', () => {
+        // Given a forward alignment of CCG-TT starting at the 3rd base
+        const alignment = { forward: 1, refpos: 3, refalign: 'CCG-TT' }
+
+        // When it is checked against the annotation sequence
+        const warning = findReferenceMismatch(alignment, parsedSequence)
+
+        // Then there is nothing to warn about
+        assert.equal(warning, null)
+    })
+
+    it('accepts a reverse alignment that is the reverse complement at refpos', () => {
+        // Given a reverse alignment whose refalign reads AACGG, the reverse
+        // complement of CCGTT, which starts at the 3rd base
+        const alignment = { forward: 0, refpos: 3, refalign: 'AACGG' }
+
+        // When it is checked against the annotation sequence
+        const warning = findReferenceMismatch(alignment, parsedSequence)
+
+        // Then there is nothing to warn about
+        assert.equal(warning, null)
+    })
+
+    it('warns when the bases at refpos differ', () => {
+        // Given an alignment of bases the annotation sequence does not have there
+        const alignment = { forward: 1, refpos: 3, refalign: 'CCGAA' }
+
+        // When it is checked against the annotation sequence
+        const warning = findReferenceMismatch(alignment, parsedSequence)
+
+        // Then a warning names the position
+        assert.match(warning, /does not match.*position 3/)
+    })
+
+    it('warns when the alignment runs past the end of the annotation sequence', () => {
+        // Given an alignment longer than what is left of the sequence
+        const alignment = { forward: 1, refpos: 7, refalign: 'TTTAA' }
+
+        // When it is checked against the annotation sequence
+        const warning = findReferenceMismatch(alignment, parsedSequence)
+
+        // Then it is reported as a mismatch
+        assert.match(warning, /does not match/)
+    })
+
+    it('has nothing to check when the annotation file has no sequence', () => {
+        // Given an annotation file without a sequence
+        const alignment = { forward: 1, refpos: 3, refalign: 'CCG' }
+
+        // When it is checked
+        const warning = findReferenceMismatch(alignment, { features: [] })
+
+        // Then no warning is raised
+        assert.equal(warning, null)
+    })
+})
+
+describe('refposOnReverseComplement', () => {
+    it('numbers from the first column, not the last, of a reverse alignment', () => {
+        // Given a 20 bp reference and a reverse alignment whose 4 reference bases
+        // cover original positions 5..8 (1-based), so tracy writes refpos 5
+        const alignment = { refpos: 5, refalign: 'AC-GT' }
+
+        // When refpos is moved onto the reverse complement
+        const refpos = refposOnReverseComplement(alignment, 20)
+
+        // Then it is the 1-based position of the first column: original 8 is 13
+        assert.equal(refpos, 13)
     })
 })
 
